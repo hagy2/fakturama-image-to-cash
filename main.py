@@ -49,7 +49,9 @@ def main():
         )
         raise SystemExit(1)
 
-    print("\nVERIFIED: Source order extracted.")
+    print(
+        "\nVERIFIED: Source order extracted."
+    )
 
     print(
         f"External Reference: "
@@ -163,18 +165,176 @@ def main():
             "VERIFIED: VAT mode = With VAT"
         )
 
+        # ---------------------------------------------
+        # 8. Resolve debtor
+        # ---------------------------------------------
+
+        print(
+            "\nResolving debtor..."
+        )
+
+        debtor_result = fakturama.resolve_debtor(
+            order.customer,
+            order.payment.method,
+        )
+
+        print(
+            "VERIFIED: Debtor resolved."
+        )
+
+        print(
+            "Debtor action:",
+            debtor_result["action"],
+        )
+
+        print(
+            "Fakturama Customer ID:",
+            debtor_result["customer_id"],
+        )
+
+        # ---------------------------------------------
+        # 9. Resolve products
+        # ---------------------------------------------
+
+        print(
+            "\nResolving products..."
+        )
+
+        for item in order.items:
+            print(
+                f"\nResolving SKU: {item.sku}"
+            )
+
+            product_result = (
+                fakturama.resolve_product(
+                    item
+                )
+            )
+
+            print(
+                "VERIFIED: Product resolved."
+            )
+
+            print(
+                "Product action:",
+                product_result["action"],
+            )
+
+            print(
+                "SKU:",
+                product_result["sku"],
+            )
+
+            if (
+                product_result["action"]
+                == "created_and_selected"
+            ):
+                print(
+                    "Created gross price:",
+                    product_result[
+                        "gross_price"
+                    ],
+                )
+
+                print(
+                    "VAT:",
+                    product_result[
+                        "vat_name"
+                    ],
+                )
+
+
+        # ---------------------------------------------
+        # 10. Complete and verify Order item lines
+        # ---------------------------------------------
+
+        print(
+            "\nCompleting Order item lines..."
+        )
+
+        line_results = (
+            fakturama.complete_order_lines(
+                order
+            )
+        )
+
+        for result in line_results:
+            print(
+                "\nVERIFIED: Order line complete."
+            )
+            print(
+                "SKU:",
+                result["sku"],
+            )
+            print(
+                "Qty:",
+                result["quantity"],
+            )
+            print(
+                "U.Price:",
+                result["unit_net_price"],
+            )
+            print(
+                "VAT:",
+                f'{result["vat_percent"]}%',
+            )
+            print(
+                "Discount:",
+                f'{result["discount_percent"]}%',
+            )
+            print(
+                "Line Price:",
+                result["line_net"],
+            )
+
+        print(
+            "\nVerifying Order totals..."
+        )
+
+        totals = (
+            fakturama.verify_order_totals(
+                order
+            )
+        )
+
+        print(
+            "VERIFIED: Order totals match source."
+        )
+
+        print(
+            "Total Net:",
+            totals["net"],
+        )
+
+        print(
+            "VAT:",
+            totals["vat"],
+        )
+
+        print(
+            "Total:",
+            totals["total"],
+        )
+
     except FakturamaError as exc:
         print(
             f"\nFAKTURAMA AUTOMATION FAILED: {exc}"
         )
         raise SystemExit(1)
 
-    print("\n===================================")
-    print("ORDER HEADER AUTOMATION COMPLETE")
-    print("===================================")
+    print(
+        "\n==================================="
+    )
+    print(
+        "ORDER HEADER + DEBTOR + PRODUCTS + LINES COMPLETE"
+    )
+    print(
+        "==================================="
+    )
 
     print(
-        "\nNext stage: debtor resolution."
+        "\nNext stage: save Order, verify Documents, "
+        "then create linked Invoice."
     )
 
 
