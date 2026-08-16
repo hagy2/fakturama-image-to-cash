@@ -16,7 +16,7 @@ The Product selector shows the required SKU row selected before the automation c
 
 ## 3. Completed Fakturama Order items and totals
 
-![Completed Fakturama Order](../artifacts/screenshots/order_lines_final_verified.png)
+![Completed Fakturama Order](../artifacts/screenshots/order_lines_latest.png)
 
 The Fakturama Order contains both source items:
 
