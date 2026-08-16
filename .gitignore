@@ -4,3 +4,12 @@ __pycache__/
 .pytest_cache/
 artifacts/logs/*.log
 .env
+artifacts/logs/*
+artifacts/screenshots/*
+!artifacts/screenshots/order_lines_latest.png
+!artifacts/screenshots/final_order_documents_verified.png
+!artifacts/screenshots/product_selector_after_row_click.png
+
+debug_*.py
+save_current_order_*.py
+verify_po*.py
