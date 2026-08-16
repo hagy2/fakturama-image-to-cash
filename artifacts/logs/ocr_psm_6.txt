@@ -1,0 +1,28 @@
+SALES ORDER INPUT =
+Source document - extract all transaction values from this image
+ORDER
+EXTERNAL REFERENCE ORDER DATE CUSTOMER 1D CURRENCY
+WEB-2026-0714-A17 2026-07-14 CUST-1007 EUR
+CUSTOMER AND CONTACT
+COMPANY CONTACT NAME
+Northstar Office GmbH Marta Klein
+EMAIL
+CUSTOMER ALIAS
+marta klein@example.test
+NORTHSTAR-BERLIN occa
++49 30 5550 1420
+ADDRESSES
+BELLING ADORESS CELIVERY ADORESS
+Northstar Office GmbH Northstar Office Warehouse
+Fredrichstrasse 88 Beusselstrasse 44
+10117 Bern 10553 Bertin
+Germany Germany
+PAYMENT
+PAYMENT METHOD PAID STATUS PAYMENT DATE
+Bank Transfer PAID 2026-07-18
+ITEMS
+1 CHR-ERG-01 Ergonomic Deck Char 2 xs 288.00 10% 16 450.00
+2 MAT-DESK-62 Antrtetque Desk Mat 3 ose 400 Oo 1% 120.00
+NET TOTAL VAT TOTAL GROSS TOTAL
+EUR 570.00 EUR 108.30 EUR 678.30
+Ad) Gate 4 synthetic | Prices are met | Dates: YYYY Ws DO | Carrency TUR WES 2026 C714 At7

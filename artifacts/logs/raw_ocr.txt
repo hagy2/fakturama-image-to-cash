@@ -1,0 +1,23 @@
+SYNTHETIC TEST DATA
+External Reference Order Date Customer ID
+WEB-2026-0714-A17 2026-07-14 CUST-1007
+Currency
+EUR
+CUSTOMER AND CONTACT
+Company: Northstar Office GmbH
+Alias: NORTHSTAR-BERLIN
+Contact: Marta Klein
+Email: marta.klein@example.test
+Phone: +49 30 5550 1420
+BILLING ADDRESS DELIVERY ADDRESS
+Northstar Office GmbH Northstar Office Warehouse
+Friedrichstrasse 88 Beusselstrasse 44
+10117 Berlin 10553 Berlin
+Germany Germany
+PAYMENT
+Method: Bank Transfer Status: PAID Payment Date: 2026-07-18
+ITEMS
+pe [own [ov [om [or [ies [oe
+Net Total: EUR 570.00
+VAT Total: EUR 108.30
+Gross Total: EUR 678.30

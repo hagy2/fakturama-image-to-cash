@@ -1,0 +1,141 @@
+PAID
+
+SALES ORDER INPUT
+
+Source document
+
+extract all transaction values from this image
+
+ORDER
+
+EXTERNAL REFERENCE
+
+ORDER DATE
+
+CUSTOMER ID
+
+CURRENCY
+
+WEB-2026-0714-A17
+
+2026-07-14
+
+CUST-1007
+
+CUSTOMER AND CONTACT
+
+CONTACT NAME
+
+COMPANY
+
+Marta Klein
+
+Northstar Office GmbH
+
+EMA
+
+CUSTOMER AUAS
+
+marta klein@example.test
+
+NORTHSTAR-BERUN
+
+rreoeet
+
++49 30 5550 1420
+
+ADDRESSES
+
+BA LING ADORESS
+
+CELIVERY ADORESS
+
+Northstar Office GmbH
+
+Northstar Office Warehouse
+
+Fredrichstrasse 88
+
+Beusselstrasse 44
+
+10117 Bern
+
+10553 Bertin
+
+Germany
+
+Germany
+
+PAYMENT
+
+PAYMENT METHOD
+
+PAID STATUS
+
+PAYMENT DATE
+
+Bank Transfer
+
+PAID
+
+2026-07-18
+
+ITEMS
+
+coe
+
+CHR-ERG-01
+
+os
+
+236.00
+
+10%
+
+16
+
+Ergonomac Deck Char
+
+2
+
+MAT-DESK-62
+
+Ante tetique Desk Mat
+
+ort
+
+4200
+
+On
+
+1%
+
+120.00
+
+NET TOTAL
+
+VAT TOTAL
+
+GROSS TOTAL
+
+EUR 570.00
+
+EUR 108.30
+
+EUR 678.30
+
+J 222
+
+oct 2}
+
+¢ eet
+
+Date
+
+vv. 0
+
+UR
+
+WES 202
+
+4a
