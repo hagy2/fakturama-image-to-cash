@@ -155,5 +155,3 @@ The automated suite covers the domain models and financial calculations. The Fak
 I would first finish and validate the linked-Invoice stage against a clean Fakturama workspace. This would include mapping the payment-method control, verifying the conditional paid status, payment date, and full payment value, saving the Invoice exactly once, and confirming both the open source Order and saved Invoice in **Data > Documents**. I would then add a resumable workflow checkpoint so a verification failure after persistence cannot create a duplicate Order on rerun. Finally, I would test multiple order layouts and image-quality conditions, add focused tests for OCR normalization, coordinate mapping, and saved-document matching, and record a clean end-to-end demonstration.
 
 
-- Written-question response in this README.
-- Completed `SUBMISSION_CHECKLIST.md` before sharing the repository.
