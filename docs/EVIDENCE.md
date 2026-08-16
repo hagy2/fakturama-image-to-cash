@@ -14,14 +14,19 @@ The Order Items table should show exactly two source lines:
 - `MAT-DESK-02`: quantity `3.00`, unit net `40.00`, VAT `19%`, discount `0.00%`, line net `120.00`.
 
 The totals area should show Total Net `570.00`, VAT `108.30`, and Total `678.30`.
+## 2. New Order header and selected Debtor
 
-## 2. Persisted Order in Data > Documents
+![New Order with selected Debtor](../artifacts/screenshots/order_header_debtor_verified.png)
+
+This screenshot shows the newly generated Order number, customer reference `WEB-2026-0714-A17`, Order date `2026-07-14`, Net price mode, With VAT mode, and the selected existing Debtor for Northstar Office GmbH.
+
+## 3. Persisted Order in Data > Documents
 
 ![Persisted Order verification](../artifacts/screenshots/final_order_documents_verified.png)
 
 The filtered Documents row is used to verify the generated Order number, `2026-07-14` date, `WEB-2026-0714-A17` customer reference, open state, and `678.30` total. Tesseract may render `PO000008` as `0000008`; the automation accepts that known document-number transformation only when the remaining row fields also match.
 
-## 3. Exact Product-row selection
+## 4. Exact Product-row selection
 
 ![Selected Product row](../artifacts/screenshots/product_selector_after_row_click.png)
 
