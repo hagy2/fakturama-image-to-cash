@@ -2,6 +2,7 @@ import calendar
 import re
 import time
 
+import numpy as np
 import pytesseract
 from pytesseract import Output
 
@@ -2540,6 +2541,843 @@ class FakturamaAutomation:
         }
 
 
+
+    # ============================================================
+    # VAT resolution / creation
+    # ============================================================
+
+    def _vat_list_is_active(self) -> bool:
+        """
+        Confirm that the active lower data list is the VAT list.
+
+        The SWT table rows themselves are not exposed reliably through
+        Win32, so the list is grounded by its visible table headers.
+        """
+        image = self.window.capture_as_image()
+
+        raw = pytesseract.image_to_string(
+            image,
+            lang="eng",
+            config="--oem 3 --psm 6",
+        )
+
+        normalized = " ".join(
+            raw.split()
+        ).casefold()
+
+        return all(
+            token in normalized
+            for token in (
+                "standard",
+                "name",
+                "description",
+                "value",
+            )
+        )
+
+    def _open_vat_list(self):
+        """
+        Open Data > VATs using OCR-grounded visible text.
+
+        When more than one VATs caption is visible (left navigation plus an
+        already-open lower tab), prefer the left-most candidate, which is
+        the Data navigation entry.  This is relative visual grounding, not
+        a hardcoded screen coordinate.
+        """
+        if self._vat_list_is_active():
+            return
+
+        candidates = self._ocr_phrase_candidates(
+            "VATs"
+        )
+
+        if not candidates:
+            raise FakturamaError(
+                "Could not locate Data > VATs."
+            )
+
+        window_rect = self.window.rectangle()
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate["left"],
+                candidate["top"],
+            )
+        )
+
+        target = candidates[0]
+
+        x = (
+            window_rect.left
+            + (
+                target["left"]
+                + target["right"]
+            ) // 2
+        )
+
+        y = (
+            window_rect.top
+            + (
+                target["top"]
+                + target["bottom"]
+            ) // 2
+        )
+
+        mouse.click(
+            button="left",
+            coords=(x, y),
+        )
+
+        deadline = time.monotonic() + 6.0
+
+        while time.monotonic() < deadline:
+            if self._vat_list_is_active():
+                return
+
+            time.sleep(0.25)
+
+        raise FakturamaError(
+            "Data > VATs was clicked, "
+            "but the VAT list could not be verified."
+        )
+
+    def _vat_search_rows(
+        self,
+        vat_name: str,
+    ):
+        """
+        Search the exact VAT name and OCR only the list rows below Search.
+
+        Returns rows whose visible Name matches the requested VAT name.
+        Each row contains its displayed numeric VAT value and click box.
+        """
+        search = self._find_edit_for_label(
+            "Search:"
+        )
+
+        search.set_focus()
+        search.set_edit_text(
+            vat_name
+        )
+
+        time.sleep(0.8)
+
+        image = self.window.capture_as_image()
+
+        evidence_dir = Path(
+            "artifacts/screenshots"
+        )
+        evidence_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        image.save(
+            evidence_dir
+            / "vat_search_latest.png"
+        )
+
+        gray = ImageOps.autocontrast(
+            ImageOps.grayscale(image)
+        )
+
+        gray = ImageEnhance.Contrast(
+            gray
+        ).enhance(2.0)
+
+        scale = 3
+
+        enlarged = gray.resize(
+            (
+                gray.width * scale,
+                gray.height * scale,
+            )
+        )
+
+        data = pytesseract.image_to_data(
+            enlarged,
+            lang="eng",
+            config="--oem 3 --psm 6",
+            output_type=Output.DICT,
+        )
+
+        window_rect = self.window.rectangle()
+        search_rect = search.rectangle()
+
+        min_row_y = (
+            search_rect.bottom
+            - window_rect.top
+            + 4
+        ) * scale
+
+        lines = {}
+
+        for index, raw_text in enumerate(
+            data["text"]
+        ):
+            value = raw_text.strip()
+
+            if not value:
+                continue
+
+            left = int(
+                data["left"][index]
+            )
+            top = int(
+                data["top"][index]
+            )
+            width = int(
+                data["width"][index]
+            )
+            height = int(
+                data["height"][index]
+            )
+
+            cy = top + height / 2
+
+            if cy < min_row_y:
+                continue
+
+            key = (
+                data["block_num"][index],
+                data["par_num"][index],
+                data["line_num"][index],
+            )
+
+            lines.setdefault(
+                key,
+                [],
+            ).append(
+                {
+                    "text": value,
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                    "cx": left + width / 2,
+                    "cy": cy,
+                }
+            )
+
+        expected_compact = re.sub(
+            r"[^A-Z0-9]",
+            "",
+            vat_name.upper(),
+        )
+
+        matches = []
+
+        for line_words in lines.values():
+            ordered = sorted(
+                line_words,
+                key=lambda word: word["left"],
+            )
+
+            line_text = " ".join(
+                word["text"]
+                for word in ordered
+            )
+
+            line_compact = re.sub(
+                r"[^A-Z0-9]",
+                "",
+                line_text.upper(),
+            )
+
+            if expected_compact not in line_compact:
+                continue
+
+            numeric_values = []
+
+            for token in re.findall(
+                r"-?\d+(?:[.,]\d+)?",
+                line_text,
+            ):
+                try:
+                    numeric_values.append(
+                        Decimal(
+                            token.replace(
+                                ",",
+                                ".",
+                            )
+                        )
+                    )
+                except Exception:
+                    pass
+
+            # The first number is normally the percentage inside the Name
+            # ("VAT 19%").  The final number is the Value column.
+            displayed_value = (
+                numeric_values[-1]
+                if numeric_values
+                else None
+            )
+
+            left = min(
+                word["left"]
+                for word in ordered
+            )
+            top = min(
+                word["top"]
+                for word in ordered
+            )
+            right = max(
+                word["left"]
+                + word["width"]
+                for word in ordered
+            )
+            bottom = max(
+                word["top"]
+                + word["height"]
+                for word in ordered
+            )
+
+            matches.append(
+                {
+                    "line_text": line_text,
+                    "value": displayed_value,
+                    "left": int(
+                        left / scale
+                    ),
+                    "top": int(
+                        top / scale
+                    ),
+                    "right": int(
+                        right / scale
+                    ),
+                    "bottom": int(
+                        bottom / scale
+                    ),
+                }
+            )
+
+        return matches
+
+    def _clear_vat_search(self):
+        try:
+            search = self._find_edit_for_label(
+                "Search:"
+            )
+
+            search.set_focus()
+            search.set_edit_text("")
+        except Exception:
+            pass
+
+    def _is_vat_editor_open(self) -> bool:
+        texts = self.visible_texts()
+
+        return (
+            "VAT code (E-Invoice)" in texts
+            and "Value" in texts
+            and "Name" in texts
+        )
+
+    def _open_vat_row(
+        self,
+        row,
+    ):
+        window_rect = self.window.rectangle()
+
+        x = (
+            window_rect.left
+            + (
+                row["left"]
+                + row["right"]
+            ) // 2
+        )
+
+        y = (
+            window_rect.top
+            + (
+                row["top"]
+                + row["bottom"]
+            ) // 2
+        )
+
+        mouse.double_click(
+            button="left",
+            coords=(x, y),
+        )
+
+        deadline = time.monotonic() + 6.0
+
+        while time.monotonic() < deadline:
+            if self._is_vat_editor_open():
+                return
+
+            time.sleep(0.25)
+
+        raise FakturamaError(
+            "VAT row was opened, but the VAT editor "
+            "could not be verified."
+        )
+
+    def _verify_open_vat(
+        self,
+        vat_name: str,
+        vat_percent,
+    ):
+        expected_percent = Decimal(
+            str(vat_percent)
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        name = self._find_edit_for_label(
+            "Name"
+        ).window_text().strip()
+
+        if name != vat_name:
+            raise FakturamaError(
+                "MANUAL REVIEW REQUIRED: "
+                f"VAT Name conflict: expected '{vat_name}', "
+                f"observed '{name}'."
+            )
+
+        value_control = self._find_edit_for_label(
+            "Value"
+        )
+
+        observed_value = (
+            self._decimal_from_control_text(
+                value_control.window_text()
+            ).quantize(
+                Decimal("0.01")
+            )
+        )
+
+        if observed_value != expected_percent:
+            raise FakturamaError(
+                "MANUAL REVIEW REQUIRED: "
+                f"VAT Value conflict for '{vat_name}': "
+                f"expected {expected_percent}, "
+                f"observed {observed_value}."
+            )
+
+        code_combo = self._find_combobox_for_label(
+            "VAT code (E-Invoice)"
+        )
+
+        observed_code = (
+            code_combo.window_text().strip()
+        )
+
+        expected_code = "S (Standard rate)"
+
+        if observed_code != expected_code:
+            raise FakturamaError(
+                "MANUAL REVIEW REQUIRED: "
+                f"VAT E-Invoice code conflict for '{vat_name}': "
+                f"expected '{expected_code}', "
+                f"observed '{observed_code}'."
+            )
+
+        return {
+            "name": name,
+            "value": observed_value,
+            "code": observed_code,
+        }
+
+    def _click_green_plus_near_list(
+        self,
+        search_control,
+    ):
+        """
+        Find and click the green + action in the active SWT data list.
+
+        SWT does not expose this image button semantically.  We ground it
+        visually by detecting a small green connected component in the
+        list-toolbar band around the Search control.
+        """
+        image = self.window.capture_as_image()
+        array = np.array(image.convert("RGB"))
+
+        window_rect = self.window.rectangle()
+        search_rect = search_control.rectangle()
+
+        local_search_top = (
+            search_rect.top
+            - window_rect.top
+        )
+
+        # Search a toolbar band around Search rather than using an absolute
+        # coordinate.  This keeps the interaction layout-relative.
+        y0 = max(
+            0,
+            local_search_top - 55,
+        )
+        y1 = min(
+            array.shape[0],
+            local_search_top + 55,
+        )
+
+        region = array[
+            y0:y1,
+            :,
+            :,
+        ]
+
+        r = region[:, :, 0].astype(
+            np.int16
+        )
+        g = region[:, :, 1].astype(
+            np.int16
+        )
+        b = region[:, :, 2].astype(
+            np.int16
+        )
+
+        mask = (
+            (g > 90)
+            & (g - r > 35)
+            & (g - b > 20)
+        )
+
+        ys, xs = np.where(mask)
+
+        if len(xs) < 12:
+            raise FakturamaError(
+                "Could not visually locate the green + "
+                "control in the VAT list."
+            )
+
+        points = set(
+            zip(
+                xs.tolist(),
+                ys.tolist(),
+            )
+        )
+
+        components = []
+
+        while points:
+            seed = points.pop()
+            stack = [seed]
+            component = [seed]
+
+            while stack:
+                x, y = stack.pop()
+
+                for nx in (
+                    x - 1,
+                    x,
+                    x + 1,
+                ):
+                    for ny in (
+                        y - 1,
+                        y,
+                        y + 1,
+                    ):
+                        neighbor = (
+                            nx,
+                            ny,
+                        )
+
+                        if neighbor in points:
+                            points.remove(
+                                neighbor
+                            )
+                            stack.append(
+                                neighbor
+                            )
+                            component.append(
+                                neighbor
+                            )
+
+            components.append(
+                component
+            )
+
+        candidates = []
+
+        for component in components:
+            if len(component) < 10:
+                continue
+
+            comp_x = [
+                point[0]
+                for point in component
+            ]
+            comp_y = [
+                point[1]
+                for point in component
+            ]
+
+            left = min(comp_x)
+            right = max(comp_x)
+            top = min(comp_y)
+            bottom = max(comp_y)
+
+            width = right - left + 1
+            height = bottom - top + 1
+
+            if not (
+                6 <= width <= 45
+                and 6 <= height <= 45
+            ):
+                continue
+
+            center_x = (
+                left + right
+            ) / 2
+
+            center_y = (
+                top + bottom
+            ) / 2
+
+            # Exclude anything inside the Search edit itself.
+            screen_x = (
+                window_rect.left
+                + center_x
+            )
+            screen_y = (
+                window_rect.top
+                + y0
+                + center_y
+            )
+
+            if (
+                search_rect.left
+                <= screen_x
+                <= search_rect.right
+                and search_rect.top
+                <= screen_y
+                <= search_rect.bottom
+            ):
+                continue
+
+            candidates.append(
+                (
+                    len(component),
+                    screen_x,
+                    screen_y,
+                )
+            )
+
+        if not candidates:
+            raise FakturamaError(
+                "Green pixels were detected, but no "
+                "small green + control could be isolated."
+            )
+
+        # The plus icon should be the strongest small green component.
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        _, x, y = candidates[0]
+
+        mouse.click(
+            button="left",
+            coords=(
+                int(x),
+                int(y),
+            ),
+        )
+
+    def _write_vat_percent(
+        self,
+        control,
+        vat_percent,
+    ):
+        expected = Decimal(
+            str(vat_percent)
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        expected_text = (
+            f"{expected:.2f}"
+        )
+
+        control.set_focus()
+
+        send_keys(
+            "^a",
+            pause=0.05,
+        )
+
+        send_keys(
+            expected_text,
+            pause=0.05,
+        )
+
+        send_keys(
+            "{TAB}",
+            pause=0.05,
+        )
+
+        time.sleep(0.4)
+
+        observed = (
+            self._decimal_from_control_text(
+                control.window_text()
+            ).quantize(
+                Decimal("0.01")
+            )
+        )
+
+        if observed != expected:
+            raise FakturamaError(
+                "VAT Value verification failed: "
+                f"expected {expected}, observed {observed}."
+            )
+
+    def _create_vat(
+        self,
+        vat_name: str,
+        vat_percent,
+    ):
+        search = self._find_edit_for_label(
+            "Search:"
+        )
+
+        self._clear_vat_search()
+
+        self._click_green_plus_near_list(
+            search
+        )
+
+        deadline = time.monotonic() + 6.0
+
+        while time.monotonic() < deadline:
+            if self._is_vat_editor_open():
+                break
+
+            time.sleep(0.25)
+        else:
+            raise FakturamaError(
+                "Green + was clicked, but the New VAT "
+                "editor could not be verified."
+            )
+
+        self._write_edit(
+            self._find_edit_for_label(
+                "Name"
+            ),
+            vat_name,
+        )
+
+        self._write_edit(
+            self._find_edit_for_label(
+                "Description"
+            ),
+            vat_name,
+        )
+
+        code_combo = self._find_combobox_for_label(
+            "VAT code (E-Invoice)"
+        )
+
+        self._select_combo_value(
+            code_combo,
+            "S (Standard rate)",
+        )
+
+        self._write_vat_percent(
+            self._find_edit_for_label(
+                "Value"
+            ),
+            vat_percent,
+        )
+
+        # Deliberately do not interact with Set as standard / Standard VAT.
+        save_button = self._find_toolbar_button(
+            "Save"
+        )
+
+        save_button.click_input()
+
+        time.sleep(0.8)
+
+        verified = self._verify_open_vat(
+            vat_name,
+            vat_percent,
+        )
+
+        return {
+            "action": "created",
+            **verified,
+        }
+
+    def ensure_vat(
+        self,
+        vat_percent,
+    ):
+        """
+        Ensure the exact VAT master required by a missing Product exists.
+
+        Reuse only when:
+          Name  == "VAT X%"
+          Value == X
+          VAT code (E-Invoice) == "S (Standard rate)"
+
+        Conflicting or ambiguous definitions require manual review.
+        """
+        vat_name = self._format_vat_name(
+            vat_percent
+        )
+
+        expected_percent = Decimal(
+            str(vat_percent)
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        self._open_vat_list()
+
+        rows = self._vat_search_rows(
+            vat_name
+        )
+
+        if len(rows) > 1:
+            self._clear_vat_search()
+
+            raise FakturamaError(
+                "MANUAL REVIEW REQUIRED: "
+                f"multiple VAT rows match '{vat_name}'."
+            )
+
+        if len(rows) == 1:
+            row = rows[0]
+
+            if (
+                row["value"] is None
+                or row["value"].quantize(
+                    Decimal("0.01")
+                )
+                != expected_percent
+            ):
+                self._clear_vat_search()
+
+                raise FakturamaError(
+                    "MANUAL REVIEW REQUIRED: "
+                    f"VAT '{vat_name}' exists but its visible "
+                    f"Value conflicts with {expected_percent}%."
+                )
+
+            self._open_vat_row(
+                row
+            )
+
+            verified = self._verify_open_vat(
+                vat_name,
+                vat_percent,
+            )
+
+            return {
+                "action": "selected_existing",
+                **verified,
+            }
+
+        # No exact VAT row: create it.
+        return self._create_vat(
+            vat_name,
+            vat_percent,
+        )
+
     # ============================================================
     # Product resolution / creation
     # ============================================================
@@ -3571,6 +4409,14 @@ class FakturamaAutomation:
             dialog
         )
 
+        # Requirement: before creating a missing Product, resolve/create
+        # its exact VAT master while keeping the Order open.
+        self.ensure_vat(
+            item.vat_percent
+        )
+
+        self._activate_open_order_editor()
+
         created = self.create_product(
             item
         )
@@ -3739,24 +4585,51 @@ class FakturamaAutomation:
     def _find_order_row_cells(
         self,
         sku: str,
+        expected_position: int | None = None,
     ):
         """
-        Locate one Order transaction row by exact SKU.
+        Locate one Order transaction row.
 
-        Important OCR behavior:
-        - The same SKU can also be visible in the Products master table.
-        - A selected Order row can cause Tesseract to miss the Qty text
-          completely because the cell is rendered white-on-blue.
+        OCR is restricted to the semantic Items -> Remarks vertical region,
+        so the same SKU in the Products master table cannot be mistaken for
+        an Order line.
 
-        Therefore an Order row is identified by:
-            exact SKU + at least 3 pure decimal values to its right
-            (U.Price, Discount, line Price)
-
-        Qty is read normally when OCR sees it.  If OCR misses Qty, its
-        X-position is inferred from another visible Order row or from the
-        Qty header; the Y-position still comes from the target SKU row.
+        A selected SWT row can render white-on-blue and Tesseract may miss
+        its SKU and/or Qty.  In that case we fall back to the source-order
+        position (Pos. 1, Pos. 2, ...) while still verifying the row's
+        U.Price / Discount / Price and VAT.
         """
         words, scale, _ = self._order_ocr_words()
+
+        window_rect = self.window.rectangle()
+        items_rect = self._find_visible_label(
+            "Items"
+        ).rectangle()
+        remarks_rect = self._find_visible_label(
+            "Remarks"
+        ).rectangle()
+
+        top_bound = (
+            items_rect.top
+            - window_rect.top
+            - 8
+        ) * scale
+
+        bottom_bound = (
+            remarks_rect.top
+            - window_rect.top
+            - 3
+        ) * scale
+
+        items_words = [
+            word
+            for word in words
+            if (
+                top_bound
+                <= word["cy"]
+                <= bottom_bound
+            )
+        ]
 
         expected_sku = self._compact_ocr_token(
             sku
@@ -3778,53 +4651,27 @@ class FakturamaAutomation:
                 )
             )
 
-        def row_for_anchor(anchor):
-            row_words = [
+        def row_words_at(y):
+            row = [
                 word
-                for word in words
+                for word in items_words
                 if abs(
-                    word["cy"] - anchor["cy"]
+                    word["cy"] - y
                 ) <= 30
             ]
 
-            row_words.sort(
+            row.sort(
                 key=lambda word: word["left"]
             )
 
-            numeric_left = [
-                word
-                for word in row_words
-                if (
-                    word["cx"] < anchor["left"]
-                    and re.fullmatch(
-                        r"\d+(?:[.,]\d+)?",
-                        word["text"].strip(),
-                    )
-                )
-            ]
+            return row
 
-            decimal_right = [
-                word
-                for word in row_words
-                if (
-                    word["cx"] > anchor["cx"]
-                    and decimal_token(word)
-                )
-            ]
-
-            decimal_right.sort(
-                key=lambda word: word["cx"]
-            )
-
-            return (
-                row_words,
-                numeric_left,
-                decimal_right,
-            )
-
+        # ------------------------------------------------------------
+        # 1. Prefer an exact SKU OCR anchor inside the Items grid.
+        # ------------------------------------------------------------
         sku_candidates = [
             word
-            for word in words
+            for word in items_words
             if (
                 self._compact_ocr_token(
                     word["text"]
@@ -3833,170 +4680,206 @@ class FakturamaAutomation:
             )
         ]
 
-        if not sku_candidates:
-            raise FakturamaError(
-                f"Could not locate SKU '{sku}' "
-                "in the active Order."
-            )
-
-        viable_rows = []
+        selected = None
 
         for sku_word in sku_candidates:
-            (
-                row_words,
-                numeric_left,
-                decimal_right,
-            ) = row_for_anchor(
-                sku_word
+            row_words = row_words_at(
+                sku_word["cy"]
             )
 
-            # Product-master rows only have one master Price.
-            # Order transaction rows have U.Price, Discount, Price.
-            if len(decimal_right) >= 3:
-                viable_rows.append(
-                    (
-                        sku_word,
-                        row_words,
-                        numeric_left,
-                        decimal_right,
-                    )
-                )
-
-        if len(viable_rows) != 1:
-            debug_rows = []
-
-            for sku_word in sku_candidates:
-                (
-                    row_words,
-                    _,
-                    _,
-                ) = row_for_anchor(
-                    sku_word
-                )
-
-                debug_rows.append(
-                    " | ".join(
-                        word["text"]
-                        for word in row_words
-                    )
-                )
-
-            raise FakturamaError(
-                f"Could not uniquely identify the Order row "
-                f"for SKU '{sku}'. Found {len(viable_rows)} "
-                f"viable rows. OCR row(s): "
-                + " || ".join(debug_rows)
-            )
-
-        (
-            sku_word,
-            row_words,
-            numeric_left,
-            decimal_right,
-        ) = viable_rows[0]
-
-        # ------------------------------------------------------------
-        # Qty
-        # ------------------------------------------------------------
-        # Normally the nearest numeric token to the left of Item No.
-        # is Qty (Pos. is farther left).
-        qty_word = None
-
-        if numeric_left:
-            qty_word = max(
-                numeric_left,
-                key=lambda word: word["cx"],
-            )
-
-        if qty_word is None:
-            # Selected rows can make Tesseract miss the Qty text. Infer
-            # the Qty column X from another transaction row.
-            qty_x_candidates = []
-
-            sku_like_words = [
+            decimal_right = [
                 word
-                for word in words
-                if re.fullmatch(
-                    r"[A-Z0-9]+(?:-[A-Z0-9]+)+",
-                    word["text"].strip().upper(),
+                for word in row_words
+                if (
+                    word["cx"] > sku_word["cx"]
+                    and decimal_token(word)
                 )
             ]
 
-            for other_sku in sku_like_words:
-                if abs(
-                    other_sku["cy"]
-                    - sku_word["cy"]
-                ) <= 10:
-                    continue
+            decimal_right.sort(
+                key=lambda word: word["cx"]
+            )
 
-                (
-                    _other_row,
-                    other_numeric_left,
-                    other_decimal_right,
-                ) = row_for_anchor(
-                    other_sku
+            if len(decimal_right) >= 3:
+                if selected is not None:
+                    raise FakturamaError(
+                        f"Multiple Order rows matched SKU '{sku}'."
+                    )
+
+                selected = {
+                    "sku_word": sku_word,
+                    "row_words": row_words,
+                    "decimal_right": decimal_right,
+                }
+
+        # ------------------------------------------------------------
+        # 2. Selected-row fallback: locate the row by Pos. number.
+        # ------------------------------------------------------------
+        if (
+            selected is None
+            and expected_position is not None
+        ):
+            pos_headers = [
+                word
+                for word in items_words
+                if self._compact_ocr_token(
+                    word["text"]
+                ) == "POS"
+            ]
+
+            position_words = [
+                word
+                for word in items_words
+                if word["text"].strip()
+                == str(expected_position)
+            ]
+
+            if pos_headers:
+                pos_x = min(
+                    pos_headers,
+                    key=lambda word: word["cy"],
+                )["cx"]
+
+                position_words.sort(
+                    key=lambda word: abs(
+                        word["cx"] - pos_x
+                    )
+                )
+            else:
+                # Pos. is the left-most numeric column in the Items grid.
+                position_words.sort(
+                    key=lambda word: word["cx"]
                 )
 
-                if (
-                    len(other_decimal_right) >= 3
-                    and other_numeric_left
-                ):
-                    other_qty = max(
-                        other_numeric_left,
-                        key=lambda word: word["cx"],
-                    )
+            for pos_word in position_words:
+                row_words = row_words_at(
+                    pos_word["cy"]
+                )
 
-                    qty_x_candidates.append(
-                        other_qty["cx"]
-                    )
-
-            # Header fallback if this is a one-line Order or OCR only
-            # recognized Qty on the header.
-            if not qty_x_candidates:
-                qty_headers = [
+                # Infer Item No. column X from another readable SKU in
+                # the Items grid.  If all SKU text is selected/unreadable,
+                # use the "Item No." header location.
+                other_sku_words = [
                     word
-                    for word in words
-                    if (
-                        self._compact_ocr_token(
-                            word["text"]
-                        )
-                        == "QTY"
+                    for word in items_words
+                    if re.fullmatch(
+                        r"[A-Z0-9]+(?:-[A-Z0-9]+)+",
+                        word["text"].strip().upper(),
                     )
                 ]
 
-                qty_x_candidates.extend(
-                    word["cx"]
-                    for word in qty_headers
+                if other_sku_words:
+                    item_no_x = min(
+                        other_sku_words,
+                        key=lambda word: abs(
+                            word["cy"] - pos_word["cy"]
+                        ),
+                    )["cx"]
+                else:
+                    item_headers = [
+                        word
+                        for word in items_words
+                        if self._compact_ocr_token(
+                            word["text"]
+                        ) == "ITEM"
+                    ]
+
+                    no_headers = [
+                        word
+                        for word in items_words
+                        if self._compact_ocr_token(
+                            word["text"]
+                        ) == "NO"
+                    ]
+
+                    if (
+                        not item_headers
+                        or not no_headers
+                    ):
+                        continue
+
+                    item_header = min(
+                        item_headers,
+                        key=lambda word: word["cy"],
+                    )
+
+                    no_header = min(
+                        no_headers,
+                        key=lambda word: abs(
+                            word["cy"]
+                            - item_header["cy"]
+                        ),
+                    )
+
+                    item_no_x = (
+                        item_header["cx"]
+                        + no_header["cx"]
+                    ) / 2
+
+                decimal_right = [
+                    word
+                    for word in row_words
+                    if (
+                        word["cx"] > item_no_x
+                        and decimal_token(word)
+                    )
+                ]
+
+                decimal_right.sort(
+                    key=lambda word: word["cx"]
                 )
 
-            if not qty_x_candidates:
-                raise FakturamaError(
-                    f"Order row for '{sku}' was found, "
-                    "but Qty text was not OCR-readable and the "
-                    "Qty column position could not be inferred."
+                if len(decimal_right) < 3:
+                    continue
+
+                synthetic_sku = {
+                    "text": sku,
+                    "left": item_no_x - 30,
+                    "top": pos_word["top"],
+                    "width": 60,
+                    "height": pos_word["height"],
+                    "cx": item_no_x,
+                    "cy": pos_word["cy"],
+                    "inferred": True,
+                }
+
+                selected = {
+                    "sku_word": synthetic_sku,
+                    "row_words": row_words,
+                    "decimal_right": decimal_right,
+                }
+
+                break
+
+        if selected is None:
+            debug = " || ".join(
+                " | ".join(
+                    word["text"]
+                    for word in row_words_at(
+                        candidate["cy"]
+                    )
                 )
+                for candidate in sku_candidates
+            )
 
-            qty_x_candidates.sort()
+            raise FakturamaError(
+                f"Could not identify Order row for SKU '{sku}'"
+                + (
+                    f" at Pos. {expected_position}"
+                    if expected_position is not None
+                    else ""
+                )
+                + f". Items-grid OCR: {debug}"
+            )
 
-            qty_cx = qty_x_candidates[
-                len(qty_x_candidates) // 2
-            ]
+        sku_word = selected["sku_word"]
+        row_words = selected["row_words"]
+        decimal_right = selected[
+            "decimal_right"
+        ]
 
-            # Synthetic OCR-style word: coordinates are real/inferred,
-            # while text=None explicitly means OCR did not read the value.
-            qty_word = {
-                "text": None,
-                "left": qty_cx - 20,
-                "top": sku_word["top"],
-                "width": 40,
-                "height": sku_word["height"],
-                "cx": qty_cx,
-                "cy": sku_word["cy"],
-                "inferred": True,
-            }
-
-        # Last three pure decimal cells in a transaction row are:
-        # U.Price, Discount, line Price.
+        # Last three plain decimal cells are:
+        # U.Price -> Discount -> line Price.
         transaction_values = (
             decimal_right[-3:]
         )
@@ -4010,6 +4893,119 @@ class FakturamaAutomation:
         line_price_word = (
             transaction_values[2]
         )
+
+        # ------------------------------------------------------------
+        # Qty: normally OCR the numeric cell immediately left of Item No.
+        # ------------------------------------------------------------
+        numeric_left = [
+            word
+            for word in row_words
+            if (
+                word["cx"] < sku_word["left"]
+                and re.fullmatch(
+                    r"\d+(?:[.,]\d+)?",
+                    word["text"].strip(),
+                )
+            )
+        ]
+
+        qty_word = None
+
+        # Pos. is an integer; Qty normally has decimals. Prefer decimals.
+        decimal_qty = [
+            word
+            for word in numeric_left
+            if (
+                "." in word["text"]
+                or "," in word["text"]
+            )
+        ]
+
+        if decimal_qty:
+            qty_word = max(
+                decimal_qty,
+                key=lambda word: word["cx"],
+            )
+
+        if qty_word is None:
+            # Infer Qty-column X from another readable Order row.
+            qty_x_candidates = []
+
+            for other_sku in [
+                word
+                for word in items_words
+                if re.fullmatch(
+                    r"[A-Z0-9]+(?:-[A-Z0-9]+)+",
+                    word["text"].strip().upper(),
+                )
+            ]:
+                if abs(
+                    other_sku["cy"]
+                    - sku_word["cy"]
+                ) <= 10:
+                    continue
+
+                other_row = row_words_at(
+                    other_sku["cy"]
+                )
+
+                candidates = [
+                    word
+                    for word in other_row
+                    if (
+                        word["cx"]
+                        < other_sku["left"]
+                        and re.fullmatch(
+                            r"\d+[.,]\d+",
+                            word["text"].strip(),
+                        )
+                    )
+                ]
+
+                if candidates:
+                    qty_x_candidates.append(
+                        max(
+                            candidates,
+                            key=lambda word: word["cx"],
+                        )["cx"]
+                    )
+
+            if not qty_x_candidates:
+                qty_headers = [
+                    word
+                    for word in items_words
+                    if self._compact_ocr_token(
+                        word["text"]
+                    ) == "QTY"
+                ]
+
+                qty_x_candidates.extend(
+                    word["cx"]
+                    for word in qty_headers
+                )
+
+            if not qty_x_candidates:
+                raise FakturamaError(
+                    f"Order row for '{sku}' was found, "
+                    "but the Qty column could not be located."
+                )
+
+            qty_x_candidates.sort()
+
+            qty_cx = qty_x_candidates[
+                len(qty_x_candidates) // 2
+            ]
+
+            qty_word = {
+                "text": None,
+                "left": qty_cx - 20,
+                "top": sku_word["top"],
+                "width": 40,
+                "height": sku_word["height"],
+                "cx": qty_cx,
+                "cy": sku_word["cy"],
+                "inferred": True,
+            }
 
         row_text = " ".join(
             word["text"]
@@ -4177,13 +5173,15 @@ class FakturamaAutomation:
     def complete_order_item_line(
         self,
         item,
+        expected_position: int | None = None,
     ):
         """
         Set Qty and line Discount from extraction, confirm U.Price and VAT,
         then verify the calculated line Price.
         """
         cells = self._find_order_row_cells(
-            item.sku
+            item.sku,
+            expected_position,
         )
 
         qty_text = cells["qty_word"].get(
@@ -4211,7 +5209,8 @@ class FakturamaAutomation:
 
         # Refresh OCR after Qty change because line Price recalculates.
         cells = self._find_order_row_cells(
-            item.sku
+            item.sku,
+            expected_position,
         )
 
         current_unit_price = self._ocr_decimal(
@@ -4232,7 +5231,8 @@ class FakturamaAutomation:
             )
 
         cells = self._find_order_row_cells(
-            item.sku
+            item.sku,
+            expected_position,
         )
 
         if not self._vat_matches_row(
@@ -4267,7 +5267,8 @@ class FakturamaAutomation:
 
         # Final row verification.
         cells = self._find_order_row_cells(
-            item.sku
+            item.sku,
+            expected_position,
         )
 
         final_qty_text = cells["qty_word"].get(
@@ -4387,10 +5388,14 @@ class FakturamaAutomation:
     ):
         results = []
 
-        for item in order.items:
+        for position, item in enumerate(
+            order.items,
+            start=1,
+        ):
             results.append(
                 self.complete_order_item_line(
-                    item
+                    item,
+                    expected_position=position,
                 )
             )
 
