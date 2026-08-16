@@ -1,78 +1,181 @@
-from datetime import date
+import sys
 
-from src.fakturama import FakturamaAutomation, FakturamaError
+from src.extraction import (
+    ExtractionError,
+    ManualReviewRequired,
+    extract_order,
+)
+from src.fakturama import (
+    FakturamaAutomation,
+    FakturamaError,
+)
 
 
 def main():
+    if len(sys.argv) != 2:
+        print(
+            "Usage: python main.py <order_image>"
+        )
+        raise SystemExit(1)
+
+    image_path = sys.argv[1]
+
+    print("===================================")
+    print("FAKTURAMA IMAGE-TO-CASH AUTOMATION")
+    print("===================================")
+
+    # -------------------------------------------------
+    # 1. Extract source order
+    # -------------------------------------------------
+
+    print(
+        f"\nExtracting order from: {image_path}"
+    )
+
     try:
-        fakturama = FakturamaAutomation().connect()
+        order = extract_order(
+            image_path
+        )
 
-        print("Connected to Fakturama.")
+    except ManualReviewRequired as exc:
+        print(
+            f"\nMANUAL REVIEW REQUIRED: {exc}"
+        )
+        raise SystemExit(2)
 
-        order_number = fakturama.open_new_order()
+    except ExtractionError as exc:
+        print(
+            f"\nEXTRACTION FAILED: {exc}"
+        )
+        raise SystemExit(1)
 
-        print("VERIFIED: Order editor is open.")
-        print(f"Generated Order No.: {order_number}")
+    print("\nVERIFIED: Source order extracted.")
 
-        reference = "TEST-REF-123"
+    print(
+        f"External Reference: "
+        f"{order.external_reference}"
+    )
 
-        observed_reference = (
-            fakturama.set_customer_reference(reference)
+    print(
+        f"Order Date: "
+        f"{order.order_date}"
+    )
+
+    print(
+        f"Customer: "
+        f"{order.customer.company}"
+    )
+
+    print(
+        f"Items: "
+        f"{len(order.items)}"
+    )
+
+    print(
+        f"Gross Total: "
+        f"{order.currency} "
+        f"{order.source_gross_total}"
+    )
+
+    # -------------------------------------------------
+    # 2. Connect to Fakturama
+    # -------------------------------------------------
+
+    fakturama = FakturamaAutomation()
+
+    try:
+        fakturama.connect()
+
+        print(
+            "\nConnected to Fakturama."
+        )
+
+        # ---------------------------------------------
+        # 3. Open New Order
+        # ---------------------------------------------
+
+        generated_order_number = (
+            fakturama.open_new_order()
         )
 
         print(
-            f"VERIFIED: Cust.Ref. = {observed_reference}"
-        )
-
-        test_date = date(2026, 7, 14)
-
-        observed_date = fakturama.set_order_date(
-            test_date
+            "VERIFIED: Order editor is open."
         )
 
         print(
-            f"VERIFIED: Order Date = {observed_date}"
+            "Generated Order No.: "
+            f"{generated_order_number}"
         )
 
-        print("Setting price mode to Net...")
+        # ---------------------------------------------
+        # 4. Customer Reference
+        # ---------------------------------------------
 
-        price_mode = fakturama.set_price_mode_net()
-
-
-        print(
-            f"VERIFIED: Price mode = {price_mode}"
-        )
-
-        date_after_price_change = (
-            fakturama.get_order_date_text()
+        fakturama.set_customer_reference(
+            order.external_reference
         )
 
         print(
-            "Order Date after changing price mode:",
-            date_after_price_change,
+            "VERIFIED: Cust.Ref. = "
+            f"{order.external_reference}"
         )
-        
 
-        print("Checking VAT mode...")
+        # ---------------------------------------------
+        # 5. Order Date
+        # ---------------------------------------------
 
-        vat_mode = fakturama.verify_vat_mode(
+        fakturama.set_order_date(
+            order.order_date
+        )
+
+        print(
+            "VERIFIED: Order Date = "
+            f"{order.order_date}"
+        )
+
+        # ---------------------------------------------
+        # 6. Net price mode
+        # ---------------------------------------------
+
+        print(
+            "Setting price mode to Net..."
+        )
+
+        fakturama.set_price_mode_net()
+
+        print(
+            "VERIFIED: Price mode = Net"
+        )
+
+        # ---------------------------------------------
+        # 7. VAT mode
+        # ---------------------------------------------
+
+        print(
+            "Checking VAT mode..."
+        )
+
+        fakturama.verify_vat_mode(
             "With VAT"
         )
 
         print(
-            f"VERIFIED: VAT mode = {vat_mode}"
-        )
-
-        screenshot = fakturama.capture_screenshot(
-            "artifacts/screenshots/order_header_complete.png"
-        )
-
-        print(
-            f"Screenshot saved to: {screenshot}"
+            "VERIFIED: VAT mode = With VAT"
         )
 
     except FakturamaError as exc:
-        print(f"ERROR: {exc}")
+        print(
+            f"\nFAKTURAMA AUTOMATION FAILED: {exc}"
+        )
+        raise SystemExit(1)
+
+    print("\n===================================")
+    print("ORDER HEADER AUTOMATION COMPLETE")
+    print("===================================")
+
+    print(
+        "\nNext stage: debtor resolution."
+    )
 
 
 if __name__ == "__main__":
