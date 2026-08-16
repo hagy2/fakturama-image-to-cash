@@ -1,0 +1,28 @@
+SALES ORDER INPUT eo
+Source document - extract all transaction values from this image
+ORDER
+EXTERNAL REFERENCE ORDER DATE CUSTOMER ID CURRENCY
+WEB-2026-0714-A17 2026-07-14 CUST-1007 EUR
+CUSTOMER AND CONTACT
+COMPANY CONTACT NAME
+Northstar Office GmbH Marta Klein
+EMAIL
+CUSTOMER ALIAS marta.klein@example.test
+NORTHSTAR-BERLIN PHONE
++49 30 5550 1420
+ADDRESSES
+BILLING ADDRESS DELIVERY ADDRESS
+Northstar Office GmbH Northstar Office Warehouse
+Friedrichstrasse 88 Beusselstrasse 44
+10117 Berlin 10553 Berlin
+Germany Germany
+PAYMENT
+PAYMENT METHOD PAID STATUS PAYMENT DATE
+Bank Transfer PAID 2026-07-18
+ITEMS
+Peo a oe oa
+1 CHR-ERG-01 Ergonomic Desk Chair 2 pcs 250.00 10% 19% 450.00
+2 MAT-DESK-02 Anti-Fatigue Desk Mat 3 pcs 40.00 0% 19% 120.00
+NET TOTAL VAT TOTAL GROSS TOTAL
+EUR 570.00 EUR 108.30 EUR 678.30
+All data is synthetic | Prices are net | Dates: YYYY-MM-DD | Currency: EUR WEB-2026-0714-A17
