@@ -86,7 +86,6 @@ class OrderItem(BaseModel):
         """
         Gross Product master price.
 
-        Transaction-level discounts are deliberately excluded.
         """
         return money(
             self.unit_net_price

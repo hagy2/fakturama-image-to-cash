@@ -10,17 +10,21 @@ def main():
             f"Window title: {fakturama.window.window_text()}"
         )
 
-        order_open = fakturama.is_order_editor_open()
+        print(
+            "Order editor before action:",
+            fakturama.is_order_editor_open(),
+        )
 
-        print(f"Order editor detected: {order_open}")
+        print("Opening New Order...")
 
-        if order_open:
-            order_number = fakturama.find_generated_order_number()
+        order_number = fakturama.open_new_order()
 
-            print(f"Generated Order No.: {order_number}")
+        print("VERIFIED: Order editor is open.")
+        print(f"Generated Order No.: {order_number}")
 
         screenshot = fakturama.capture_screenshot(
-            "artifacts/screenshots/current_state.png"
+            "artifacts/screenshots/"
+            "new_order_open.png"
         )
 
         print(f"Screenshot saved to: {screenshot}")
