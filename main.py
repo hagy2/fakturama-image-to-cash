@@ -316,6 +316,37 @@ def main():
             totals["total"],
         )
 
+        # ---------------------------------------------
+        # 11. Save and verify Order persistence
+        # ---------------------------------------------
+
+        print(
+            "\nSaving Order exactly once..."
+        )
+
+        saved_order = (
+            fakturama.save_and_verify_order(
+                order,
+                generated_order_number,
+            )
+        )
+
+        print(
+            "VERIFIED: Order saved in Data > Documents."
+        )
+        print(
+            "Order No.:",
+            saved_order["order_number"],
+        )
+        print(
+            "State:",
+            saved_order["state"],
+        )
+        print(
+            "Total:",
+            saved_order["total"],
+        )
+
     except FakturamaError as exc:
         print(
             f"\nFAKTURAMA AUTOMATION FAILED: {exc}"
@@ -326,15 +357,14 @@ def main():
         "\n==================================="
     )
     print(
-        "ORDER HEADER + DEBTOR + PRODUCTS + LINES COMPLETE"
+        "ORDER CREATION + PERSISTED SAVE COMPLETE"
     )
     print(
         "==================================="
     )
 
     print(
-        "\nNext stage: save Order, verify Documents, "
-        "then create linked Invoice."
+        "\nNext stage: create and complete the linked Invoice."
     )
 
 

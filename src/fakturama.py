@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
-from PIL import ImageEnhance, ImageOps
+from PIL import ImageEnhance, ImageGrab, ImageOps
 from pywinauto import Desktop, mouse
 from pywinauto.keyboard import send_keys
 
@@ -224,12 +224,8 @@ class FakturamaAutomation:
         """
         Always open a genuinely new Order editor.
 
-        Previous versions returned the currently active Order when one was
-        already open.  That made reruns append products to an old unsaved
-        Order.  We now click the Order toolbar every time and verify that
-        the Order-number Edit control itself has changed, which proves a
-        different editor tab became active even if Fakturama temporarily
-        reuses the same unsaved document number.
+        This is the implementation from the last committed workflow that was
+        verified on the user's Fakturama installation.
         """
         self.require_connection()
 
@@ -281,8 +277,6 @@ class FakturamaAutomation:
                         or current_handle
                         != previous_no_handle
                     ):
-                        # Verify that the new editor has not inherited
-                        # the previous transaction's customer reference.
                         cust_ref = (
                             self._find_edit_for_label(
                                 "Cust.Ref."
@@ -1705,47 +1699,28 @@ class FakturamaAutomation:
 
         return search
 
-    def _find_exact_debtor_candidates(
+    def _filter_exact_debtor_rows(
         self,
-        dialog,
+        rows,
         customer,
     ):
         """
-        Find safe debtor candidates from the unfiltered table.
-
-        First Name, Name, ZIP and City must match exactly.
-
-        If Company is fully visible, it must also match exactly.
-        If Fakturama truncates Company with "...", only a prefix match is
-        accepted at this stage and the full company is verified immediately
-        after selection, before the Order can be saved.
+        Apply the required exact debtor identity rules to already OCR-read
+        selector rows. Keeping matching separate lets the caller retry OCR
+        without accidentally entering the creation branch on one bad read.
         """
-        # Fakturama can retain a previous Search value across dialog
-        # openings. Always clear it before reading the full table.
-        self._clear_selector_search(
-            dialog
-        )
-
-        rows = self._ocr_selector_rows(
-            dialog
-        )
-
         expected_company = self._normalize_match_text(
             customer.company
         )
-
         expected_first = self._normalize_match_text(
             customer.first_name
         )
-
         expected_last = self._normalize_match_text(
             customer.last_name
         )
-
         expected_zip = self._normalize_match_text(
             customer.invoice_address.zip_code
         )
-
         expected_city = self._normalize_match_text(
             customer.invoice_address.city
         )
@@ -1807,15 +1782,183 @@ class FakturamaAutomation:
                 ):
                     continue
 
-                row["company_needs_post_verify"] = True
+                row[
+                    "company_needs_post_verify"
+                ] = True
 
             else:
                 if normalized_company != expected_company:
                     continue
 
-                row["company_needs_post_verify"] = False
+                row[
+                    "company_needs_post_verify"
+                ] = False
 
             candidates.append(row)
+
+        return candidates
+
+    def _find_exact_debtor_candidates(
+        self,
+        dialog,
+        customer,
+        *,
+        clear_search: bool = True,
+    ):
+        """
+        Find a single safe existing debtor.
+
+        Primary path:
+        exact Company/First Name/Last Name/ZIP/City using parsed OCR rows.
+
+        Recovery path:
+        Fakturama's SWT selector sometimes drops one text column from OCR.
+        If that happens, allow one unique row only when Company, ZIP and
+        City match and any visible First/Last Name values do not conflict.
+        The selected Order is still post-verified before continuing.
+        """
+        if clear_search:
+            self._clear_selector_search(
+                dialog
+            )
+
+        expected_company = self._normalize_match_text(
+            customer.company
+        )
+        expected_first = self._normalize_match_text(
+            customer.first_name
+        )
+        expected_last = self._normalize_match_text(
+            customer.last_name
+        )
+        expected_zip = self._normalize_match_text(
+            customer.invoice_address.zip_code
+        )
+        expected_city = self._normalize_match_text(
+            customer.invoice_address.city
+        )
+
+        best_rows = []
+
+        for _ in range(3):
+            rows = self._ocr_selector_rows(
+                dialog
+            )
+
+            candidates = self._filter_exact_debtor_rows(
+                rows,
+                customer,
+            )
+
+            if candidates:
+                return candidates
+
+            if len(rows) > len(best_rows):
+                best_rows = rows
+
+            time.sleep(0.45)
+
+        # Recovery for SWT OCR dropping a name/company column.
+        recovery = []
+
+        for row in best_rows:
+            company_display = self._normalize_match_text(
+                str(row.get("company_display", ""))
+                .replace("...", "")
+                .rstrip(".")
+            )
+            first = self._normalize_match_text(
+                row.get("first_name", "")
+            )
+            last = self._normalize_match_text(
+                row.get("last_name", "")
+            )
+            zip_code = self._normalize_match_text(
+                row.get("zip_code", "")
+            )
+            city = self._normalize_match_text(
+                row.get("city", "")
+            )
+
+            # Required location must be exact.
+            if zip_code != expected_zip or city != expected_city:
+                continue
+
+            # Any visible name must agree. Missing OCR text is tolerated,
+            # conflicting text is not.
+            if first and first != expected_first:
+                continue
+            if last and last != expected_last:
+                continue
+
+            # Company must be exact, a visible prefix, or temporarily
+            # missing from OCR. A conflicting visible company is rejected.
+            company_ok = False
+
+            if not company_display:
+                company_ok = True
+            elif company_display == expected_company:
+                company_ok = True
+            elif expected_company.startswith(company_display):
+                company_ok = True
+            else:
+                expected_tokens = set(expected_company.split())
+                visible_tokens = set(company_display.split())
+
+                if (
+                    expected_tokens
+                    and visible_tokens
+                    and len(expected_tokens & visible_tokens) >= 2
+                ):
+                    company_ok = True
+
+            if not company_ok:
+                continue
+
+            recovered = dict(row)
+            recovered["company_needs_post_verify"] = True
+            recovery.append(recovered)
+
+        if len(recovery) == 1:
+            return recovery
+
+        return recovery
+
+    def _search_exact_debtor_candidates(
+        self,
+        dialog,
+        customer,
+    ):
+        """
+        Final existence-check retry using the selector's Search field, as
+        required by the task. This is only used after unfiltered OCR could
+        not establish a safe exact match.
+        """
+        search = self._selector_search_edit(
+            dialog
+        )
+
+        search.set_focus()
+        search.set_edit_text(
+            customer.company
+        )
+
+        time.sleep(0.9)
+
+        try:
+            candidates = (
+                self._find_exact_debtor_candidates(
+                    dialog,
+                    customer,
+                    clear_search=False,
+                )
+            )
+        finally:
+            try:
+                search.set_focus()
+                search.set_edit_text("")
+            except Exception:
+                pass
 
         return candidates
 
@@ -1825,17 +1968,16 @@ class FakturamaAutomation:
         row,
     ):
         """
-        Click one OCR-detected row and confirm it with the native OK button.
+        Select one OCR-grounded debtor row and confirm with a real mouse
+        click on OK. SWT click_input() can report success without firing.
         """
         dialog_rect = dialog.rectangle()
 
         mouse.click(
             button="left",
             coords=(
-                dialog_rect.left
-                + int(row["id_center_x"]),
-                dialog_rect.top
-                + int(row["row_center_y"]),
+                dialog_rect.left + int(row["id_center_x"]),
+                dialog_rect.top + int(row["row_center_y"]),
             ),
         )
 
@@ -1853,105 +1995,104 @@ class FakturamaAutomation:
 
         if len(buttons) != 1:
             raise FakturamaError(
-                "Could not uniquely locate OK "
-                "in the address selector."
+                "Could not uniquely locate OK in the address selector."
             )
 
-        buttons[0].click_input()
-        time.sleep(0.6)
+        rect = buttons[0].rectangle()
+
+        mouse.click(
+            button="left",
+            coords=(
+                (rect.left + rect.right) // 2,
+                (rect.top + rect.bottom) // 2,
+            ),
+        )
+
+        time.sleep(0.8)
 
     def _verify_selected_order_company(
         self,
         expected_company: str,
     ):
         """
-        Verify the full company after debtor selection.
-
-        Fakturama truncates the Company column in its SWT selector table.
-        The selected Order address, however, contains the full company.
-        Native control text is checked first; OCR of the semantic Addresses
-        region is used as a fallback.
+        Verify the selected debtor from the populated Order address.
+        Fakturama can repaint slowly after the selector closes, so retry.
         """
-        expected_normalized = (
-            self._normalize_match_text(
-                expected_company
-            )
+        expected_normalized = self._normalize_match_text(
+            expected_company
         )
 
-        # Prefer native control text when available.
-        for control in self.visible_controls():
+        for _ in range(4):
             try:
-                value = self._normalize_match_text(
-                    control.window_text()
+                self._activate_open_order_editor()
+            except Exception:
+                pass
+
+            for control in self.visible_controls():
+                try:
+                    if control.class_name() != "Edit":
+                        continue
+
+                    value = self._normalize_match_text(
+                        control.window_text()
+                    )
+
+                    if (
+                        expected_normalized
+                        and expected_normalized in value
+                    ):
+                        return True
+                except Exception:
+                    continue
+
+            try:
+                addresses_label = self._find_visible_label("Addresses")
+                items_label = self._find_visible_label("Items")
+
+                window_rect = self.window.rectangle()
+                addresses_rect = addresses_label.rectangle()
+                items_rect = items_label.rectangle()
+
+                top = max(
+                    0,
+                    addresses_rect.top - window_rect.top,
                 )
 
-                if (
-                    expected_normalized
-                    and expected_normalized in value
-                ):
+                bottom = max(
+                    top + 20,
+                    items_rect.top - window_rect.top,
+                )
+
+                image = self.window.capture_as_image()
+
+                region = image.crop(
+                    (
+                        0,
+                        top,
+                        image.width,
+                        min(image.height, bottom),
+                    )
+                )
+
+                raw = pytesseract.image_to_string(
+                    region,
+                    lang="eng",
+                    config="--oem 3 --psm 6",
+                )
+
+                if expected_normalized in self._normalize_match_text(raw):
                     return True
 
             except Exception:
-                continue
+                pass
 
-        # OCR only the Order's Addresses region.
-        addresses_label = self._find_visible_label(
-            "Addresses"
+            time.sleep(0.4)
+
+        raise FakturamaError(
+            "MANUAL REVIEW REQUIRED: the debtor selector matched the "
+            "required identity fields, but the populated Order address "
+            f"could not confirm Company '{expected_company}'."
         )
-
-        items_label = self._find_visible_label(
-            "Items"
-        )
-
-        window_rect = self.window.rectangle()
-        addresses_rect = addresses_label.rectangle()
-        items_rect = items_label.rectangle()
-
-        top = max(
-            0,
-            addresses_rect.top
-            - window_rect.top
-        )
-
-        bottom = max(
-            top + 20,
-            items_rect.top
-            - window_rect.top
-        )
-
-        image = self.window.capture_as_image()
-
-        region = image.crop(
-            (
-                0,
-                top,
-                image.width,
-                min(
-                    image.height,
-                    bottom,
-                ),
-            )
-        )
-
-        text = pytesseract.image_to_string(
-            region,
-            lang="eng",
-            config="--oem 3 --psm 6",
-        )
-
-        observed = self._normalize_match_text(
-            text
-        )
-
-        if expected_normalized not in observed:
-            raise FakturamaError(
-                "MANUAL REVIEW REQUIRED: "
-                "debtor row matched First Name, Name, ZIP and City, "
-                "but the full selected Company could not be verified "
-                f"as '{expected_company}'."
-            )
-
-        return True
 
     def _is_new_debtor_editor_open(self) -> bool:
         texts = self.visible_texts()
@@ -1959,8 +2100,11 @@ class FakturamaAutomation:
         return (
             "Customer ID" in texts
             and "Company" in texts
-            and "First Name Last Name" in texts
             and "Addresses" in texts
+            and (
+                "First Name Last Name" in texts
+                or "Salutation" in texts
+            )
         )
 
     def open_new_debtor_from_order(self):
@@ -1970,23 +2114,44 @@ class FakturamaAutomation:
                 "no verified Order editor is open."
             )
 
-        controls = self._find_order_address_action_controls()
-        create_icon = controls[1]
-
-        # SWT image controls may accept click_input() without actually
-        # firing the mouse listener. Use a real screen click at the
-        # verified icon center instead.
-        point = create_icon.rectangle().mid_point()
-
         try:
             self.window.set_focus()
         except Exception:
             pass
 
-        mouse.click(
-            button="left",
-            coords=(point.x, point.y),
-        )
+        # The lower green plus beside Addresses edits the current document's
+        # address data; it is not the master-data creation action required by
+        # the workflow.  Keep the Order open and use New Contact in the left
+        # New panel to open a real New Debtor editor.
+        clicked = False
+
+        for control in self.visible_controls():
+            try:
+                if (
+                    control.window_text().strip().casefold()
+                    != "new contact"
+                ):
+                    continue
+
+                control.click_input()
+                clicked = True
+                break
+
+            except Exception:
+                continue
+
+        first_deadline = time.monotonic() + 4.0
+
+        while time.monotonic() < first_deadline:
+            if self._is_new_debtor_editor_open():
+                return
+
+            time.sleep(0.2)
+
+        if not clicked or not self._is_new_debtor_editor_open():
+            self._ocr_click_phrase(
+                "New Contact"
+            )
 
         deadline = time.monotonic() + 8.0
 
@@ -1996,8 +2161,13 @@ class FakturamaAutomation:
 
             time.sleep(0.2)
 
+        self.capture_screenshot(
+            "artifacts/screenshots/"
+            "new_debtor_editor_failure.png"
+        )
+
         raise FakturamaError(
-            "New Debtor icon was clicked, "
+            "New Contact was triggered, "
             "but the editor could not be verified."
         )
 
@@ -2449,6 +2619,16 @@ class FakturamaAutomation:
             customer,
         )
 
+        # One OCR miss must not send an existing customer into the
+        # New Debtor branch. Retry using the selector Search field.
+        if len(candidates) == 0:
+            candidates = (
+                self._search_exact_debtor_candidates(
+                    dialog,
+                    customer,
+                )
+            )
+
         if len(candidates) > 1:
             self._cancel_address_selector(
                 dialog
@@ -2478,7 +2658,49 @@ class FakturamaAutomation:
                 "customer_id": row["customer_id"],
             }
 
-        # No safe candidate -> create.
+        # No exact candidate was parsed. Before creating anything,
+        # check whether existing customer rows are visibly present. If so,
+        # this is an ambiguous OCR miss and we MUST NOT create a duplicate.
+        try:
+            self._clear_selector_search(
+                dialog
+            )
+
+            selector_image = dialog.capture_as_image()
+
+            selector_raw = pytesseract.image_to_string(
+                selector_image,
+                lang="eng",
+                config="--oem 3 --psm 6",
+            )
+
+            normalized_selector = re.sub(
+                r"[^A-Z0-9]",
+                "",
+                selector_raw.upper(),
+            )
+
+            visible_customer_ids = re.findall(
+                r"CUST[0-9OIL]+",
+                normalized_selector,
+            )
+
+        except Exception:
+            visible_customer_ids = []
+
+        if visible_customer_ids:
+            self._cancel_address_selector(
+                dialog
+            )
+
+            raise FakturamaError(
+                "MANUAL REVIEW REQUIRED: existing debtor rows are visible "
+                "but no single exact match could be proven. Refusing to "
+                "create a duplicate customer."
+            )
+
+        # Only a selector with no visible existing customer IDs may enter
+        # the missing-debtor creation branch.
         self._cancel_address_selector(
             dialog
         )
@@ -3449,17 +3671,22 @@ class FakturamaAutomation:
         self,
         timeout: float = 8.0,
     ):
-        dialog = Desktop(
+        dialog_spec = Desktop(
             backend="win32"
         ).window(
-            title="Select a product"
+            title_re=r"(?i)^Select a product\s*$"
         )
 
         try:
-            dialog.wait(
+            dialog_spec.wait(
                 "exists visible",
                 timeout=timeout,
             )
+
+            # Resolve the title query once and retain the real HWND wrapper.
+            # Returning WindowSpecification makes every later operation search
+            # by title again, which can lose an SWT modal between keystrokes.
+            dialog = dialog_spec.wrapper_object()
 
         except Exception as exc:
             raise FakturamaError(
@@ -3468,27 +3695,158 @@ class FakturamaAutomation:
 
         return dialog
 
-    def open_existing_product_selector(self):
-        if not self.is_order_editor_open():
-            raise FakturamaError(
-                "Cannot open product selector: "
-                "no verified Order editor is open."
+    def _visible_product_selector(self):
+        """Return the live Product selector, including one behind Fakturama."""
+        try:
+            dialog_spec = Desktop(
+                backend="win32"
+            ).window(
+                title_re=r"(?i)^Select a product\s*$"
             )
 
-        controls = self._find_order_item_action_controls()
+            if not (
+                dialog_spec.exists(timeout=0.2)
+            ):
+                return None
 
-        try:
-            controls[0].click_input()
+            # Pin this exact top-level HWND.  Do not return the lazy title
+            # query, because a later capture_as_image() would re-run the
+            # search and can raise ElementNotFoundError even though this same
+            # selector was already verified.
+            dialog = dialog_spec.wrapper_object()
+
+            if not dialog.is_visible():
+                return None
+
+            try:
+                if dialog.is_minimized():
+                    dialog.restore()
+            except Exception:
+                pass
+
+            try:
+                dialog.set_focus()
+            except Exception:
+                pass
+
+            return dialog
 
         except Exception:
-            point = controls[0].rectangle().mid_point()
+            return None
 
-            mouse.click(
-                button="left",
-                coords=(point.x, point.y),
+    def open_existing_product_selector(self):
+        """
+        Open the upper Product selector beside the Order Items table.
+
+        Fakturama's SWT empty-icon wrapper can accept click_input() without
+        actually firing the action. Always use a real mouse click on the
+        dynamically discovered upper item-action control and retry after
+        re-grounding the Order editor.
+        """
+        already_open = self._visible_product_selector()
+
+        if already_open is not None:
+            return already_open
+
+        last_error = None
+
+        for attempt in range(3):
+            try:
+                self._activate_open_order_editor()
+
+                if not self.is_order_editor_open():
+                    raise FakturamaError(
+                        "Cannot open product selector: "
+                        "no verified Order editor is open."
+                    )
+
+                controls = (
+                    self._find_order_item_action_controls()
+                )
+
+                # controls[0] is the upper existing-product selector.
+                selector_control = controls[0]
+                rect = selector_control.rectangle()
+
+                x = (
+                    rect.left + rect.right
+                ) // 2
+
+                y = (
+                    rect.top + rect.bottom
+                ) // 2
+
+                if attempt == 0:
+                    # First use the verified native wrapper.  On systems
+                    # where SWT exposes the action correctly this is the
+                    # most reliable path and does not depend on DPI scaling.
+                    selector_control.click_input()
+
+                elif attempt == 1:
+                    # Some SWT wrappers accept click_input() without firing
+                    # their listener.  A real mouse click at the wrapper's
+                    # live screen rectangle then triggers the same action.
+                    mouse.click(
+                        button="left",
+                        coords=(x, y),
+                    )
+
+                else:
+                    # Last fallback is grounded from the semantic Items
+                    # label itself.  The selector icon is the first action
+                    # directly below that label.  This avoids a stale or
+                    # incorrectly offset empty Static wrapper.
+                    items_rect = self._find_visible_label(
+                        "Items"
+                    ).rectangle()
+
+                    semantic_x = int(
+                        round(items_rect.right - 7)
+                    )
+                    semantic_y = int(
+                        round(items_rect.bottom + 21)
+                    )
+
+                    mouse.click(
+                        button="left",
+                        coords=(semantic_x, semantic_y),
+                    )
+
+                deadline = time.monotonic() + 3.5
+
+                while time.monotonic() < deadline:
+                    dialog = self._visible_product_selector()
+
+                    if dialog is not None:
+                        return dialog
+
+                    time.sleep(0.15)
+
+                raise FakturamaError(
+                    "The Product selector did not appear after "
+                    f"opening attempt {attempt + 1}."
+                )
+
+            except Exception as exc:
+                last_error = exc
+
+                # A failed SWT click must not fall through to Product
+                # creation. Re-ground and retry the upper selector.
+                time.sleep(0.45)
+
+        try:
+            self.window.capture_as_image().save(
+                "artifacts/screenshots/"
+                "product_selector_open_failure.png"
             )
+        except Exception:
+            pass
 
-        return self._product_selector_dialog()
+        raise FakturamaError(
+            "Could not open 'Select a product' after trying the "
+            "native Items action, its physical screen position, and "
+            "the Items-label-relative selector position."
+        ) from last_error
 
     @staticmethod
     def _product_selector_search_edit(dialog):
@@ -3510,6 +3868,86 @@ class FakturamaAutomation:
             )
 
         return edits[0]
+
+    def _capture_product_selector_image(self, dialog):
+        """
+        Capture the SWT Product selector as a real PIL image.
+
+        HwndWrapper.capture_as_image() can return None for this Java/SWT
+        modal even while its HWND is valid and visible.  Fall back to a
+        direct Windows desktop-region capture using the verified dialog
+        rectangle so OCR never receives None.
+        """
+        image = None
+
+        try:
+            image = dialog.capture_as_image()
+        except Exception:
+            image = None
+
+        if (
+            image is not None
+            and image.width > 20
+            and image.height > 20
+        ):
+            return image.convert("RGB")
+
+        try:
+            rect = dialog.rectangle()
+        except Exception:
+            rect = None
+
+        if (
+            rect is None
+            or rect.width() <= 20
+            or rect.height() <= 20
+        ):
+            live_dialog = self._visible_product_selector()
+
+            if live_dialog is None:
+                raise FakturamaError(
+                    "The Product selector closed before it could be read."
+                )
+
+            dialog = live_dialog
+            rect = dialog.rectangle()
+
+        if rect.width() <= 20 or rect.height() <= 20:
+            raise FakturamaError(
+                "The Product selector has an invalid empty screen rectangle."
+            )
+
+        bbox = (
+            int(rect.left),
+            int(rect.top),
+            int(rect.right),
+            int(rect.bottom),
+        )
+
+        try:
+            image = ImageGrab.grab(
+                bbox=bbox,
+                all_screens=True,
+            )
+        except TypeError:
+            image = ImageGrab.grab(
+                bbox=bbox,
+            )
+        except Exception as exc:
+            raise FakturamaError(
+                "Could not capture the visible Product selector for OCR."
+            ) from exc
+
+        if (
+            image is None
+            or image.width <= 20
+            or image.height <= 20
+        ):
+            raise FakturamaError(
+                "Windows returned an empty image for the Product selector."
+            )
+
+        return image.convert("RGB")
 
     @staticmethod
     def _normalize_sku_ocr(value: str) -> str:
@@ -3545,34 +3983,26 @@ class FakturamaAutomation:
         sku: str,
     ):
         """
-        Resolve an exact SKU from the UNFILTERED product selector.
-
-        Fakturama's Search field is not reliable for these SKU values, so
-        the automation deliberately clears Search and performs its own OCR
-        over the visible product table.
+        Resolve an exact SKU directly from the visible Product table.
 
         The selector screenshot is enlarged 3x before OCR because the SWT
         table text is very small. Returned coordinates are converted back
         to the original dialog coordinate system for clicking.
         """
-        search = self._product_selector_search_edit(
+        # Do not type into SWT Search.  On this Fakturama build, physical
+        # typing can dismiss/recreate the modal HWND and leave pywinauto with
+        # an empty capture.  The unfiltered Product table already exposes the
+        # exact Item No. values, and OCR below validates the required SKU.
+        try:
+            dialog.set_focus()
+        except Exception:
+            pass
+
+        time.sleep(0.45)
+
+        image = self._capture_product_selector_image(
             dialog
         )
-
-        # Do not depend on Fakturama's built-in Search filtering.
-        search.set_focus()
-
-        try:
-            search.set_edit_text("")
-        except Exception:
-            search.type_keys(
-                "^a{BACKSPACE}",
-                set_foreground=True,
-            )
-
-        time.sleep(0.7)
-
-        image = dialog.capture_as_image()
 
         debug_path = Path(
             "artifacts/screenshots/"
@@ -3582,7 +4012,11 @@ class FakturamaAutomation:
             parents=True,
             exist_ok=True,
         )
-        image.save(debug_path)
+        try:
+            image.save(debug_path)
+        except Exception:
+            # Diagnostic evidence must never abort Product selection.
+            pass
 
         gray = ImageOps.grayscale(
             image
@@ -3903,19 +4337,155 @@ class FakturamaAutomation:
         dialog,
         match,
     ):
+        """
+        Select the exact OCR-grounded SKU row and press OK using physical
+        mouse clicks, then verify that the selector actually closes.
+        """
         dialog_rect = dialog.rectangle()
 
-        mouse.click(
-            button="left",
-            coords=(
-                dialog_rect.left
-                + match["left"]
-                + match["width"] // 2,
-                dialog_rect.top
-                + match["top"]
-                + match["height"] // 2,
-            ),
+        image_x = (
+            match["left"]
+            + match["width"] / 2
         )
+        image_y = (
+            match["top"]
+            + match["height"] / 2
+        )
+
+        target_x = int(
+            round(
+                dialog_rect.left
+                + image_x
+            )
+        )
+        target_y = int(
+            round(
+                dialog_rect.top
+                + image_y
+            )
+        )
+
+        # A double-click can dismiss this SWT dialog without committing its
+        # row.  Select with one click, verify the target row is visibly blue,
+        # and only then press OK.  The blue check is restricted to the table
+        # area so the selected left-side "all" node cannot pass verification.
+        def target_row_is_selected(image):
+            pixels = np.asarray(
+                image.convert("RGB")
+            )
+
+            row_top = max(
+                0,
+                int(image_y - 10),
+            )
+            row_bottom = min(
+                image.height,
+                int(image_y + 11),
+            )
+            table_left = max(
+                0,
+                int(match["left"] - 8),
+            )
+            table_right = max(
+                table_left + 1,
+                image.width - 8,
+            )
+
+            band = pixels[
+                row_top:row_bottom,
+                table_left:table_right,
+            ]
+
+            if band.size == 0:
+                return False
+
+            red = band[:, :, 0].astype(np.int16)
+            green = band[:, :, 1].astype(np.int16)
+            blue = band[:, :, 2].astype(np.int16)
+
+            selected_blue = (
+                (blue >= 135)
+                & (blue >= red + 35)
+                & (blue >= green + 20)
+            )
+
+            return float(selected_blue.mean()) >= 0.08
+
+        name_cell_x = int(
+            min(
+                dialog_rect.right - 20,
+                target_x + 145,
+            )
+        )
+
+        click_attempts = [
+            (
+                "absolute SKU cell",
+                lambda: mouse.click(
+                    button="left",
+                    coords=(target_x, target_y),
+                ),
+            ),
+            (
+                "absolute Name cell",
+                lambda: mouse.click(
+                    button="left",
+                    coords=(name_cell_x, target_y),
+                ),
+            ),
+            (
+                "client-relative row",
+                lambda: dialog.click_input(
+                    coords=(
+                        int(image_x + 145),
+                        max(1, int(image_y - 30)),
+                    )
+                ),
+            ),
+        ]
+
+        selected = False
+        after_click_image = None
+
+        try:
+            dialog.set_focus()
+        except Exception:
+            pass
+
+        for _, click_action in click_attempts:
+            try:
+                click_action()
+                time.sleep(0.35)
+
+                after_click_image = (
+                    self._capture_product_selector_image(
+                        dialog
+                    )
+                )
+
+                if target_row_is_selected(
+                    after_click_image
+                ):
+                    selected = True
+                    break
+
+            except Exception:
+                continue
+
+        if after_click_image is not None:
+            try:
+                after_click_image.save(
+                    "artifacts/screenshots/"
+                    "product_selector_after_row_click.png"
+                )
+            except Exception:
+                pass
+
+        if not selected:
+            raise FakturamaError(
+                f"Could not visibly select Product row '{match['sku']}'; "
+                "OK was not clicked."
+            )
 
         buttons = []
 
@@ -3923,6 +4493,7 @@ class FakturamaAutomation:
             try:
                 if (
                     control.class_name() == "Button"
+                    and control.is_visible()
                     and control.window_text().strip() == "OK"
                 ):
                     buttons.append(control)
@@ -3935,8 +4506,43 @@ class FakturamaAutomation:
                 "in the product selector."
             )
 
-        buttons[0].click_input()
-        time.sleep(0.6)
+        # Physically click OK only after the exact row passed the blue-row
+        # selection check above.
+        try:
+            ok_rect = buttons[0].rectangle()
+            ok_point = ok_rect.mid_point()
+
+            mouse.click(
+                button="left",
+                coords=(ok_point.x, ok_point.y),
+            )
+        except Exception as exc:
+            try:
+                buttons[0].click_input()
+            except Exception as fallback_exc:
+                raise FakturamaError(
+                    "Could not confirm the selected Product with OK."
+                ) from fallback_exc
+
+        deadline = time.monotonic() + 4.0
+
+        while time.monotonic() < deadline:
+            try:
+                if self._visible_product_selector() is None:
+                    time.sleep(0.45)
+                    self._activate_open_order_editor()
+                    return
+            except Exception:
+                time.sleep(0.45)
+                self._activate_open_order_editor()
+                return
+
+            time.sleep(0.15)
+
+        raise FakturamaError(
+            "Product selector remained open after OK; "
+            "the Product was not committed to the Order."
+        )
 
     def _is_new_product_editor_open(self) -> bool:
         """
@@ -4285,64 +4891,58 @@ class FakturamaAutomation:
         has a numeric Qty to its left and at least two money values to its
         right (U.Price and line Price).
         """
-        words, _, _ = self._order_ocr_words()
+        words, scale, _ = self._order_ocr_words()
 
         expected = self._compact_ocr_token(
             sku
         )
 
-        count = 0
+        window_rect = self.window.rectangle()
+        items_rect = self._find_visible_label(
+            "Items"
+        ).rectangle()
+        remarks_rect = self._find_visible_label(
+            "Remarks"
+        ).rectangle()
+
+        top_bound = (
+            items_rect.top
+            - window_rect.top
+            - 8
+        ) * scale
+        bottom_bound = (
+            remarks_rect.top
+            - window_rect.top
+            - 3
+        ) * scale
+
+        matched_rows = []
 
         for sku_word in words:
-            if (
-                self._compact_ocr_token(
-                    sku_word["text"]
-                )
-                != expected
+            if not (
+                top_bound
+                <= sku_word["cy"]
+                <= bottom_bound
             ):
                 continue
 
-            row_words = [
-                word
-                for word in words
-                if abs(
-                    word["cy"]
-                    - sku_word["cy"]
-                ) <= 30
-            ]
+            compact_value = self._compact_ocr_token(
+                sku_word["text"]
+            )
 
-            numeric_left = [
-                word
-                for word in row_words
-                if (
-                    word["cx"]
-                    < sku_word["left"]
-                    and re.fullmatch(
-                        r"\d+(?:[.,]\d+)?",
-                        word["text"].strip(),
-                    )
-                )
-            ]
+            # Accept both a standalone SKU and SWT's merged Qty|SKU token.
+            if not compact_value.endswith(expected):
+                continue
 
-            money_right = [
-                word
-                for word in row_words
-                if (
-                    word["cx"] > sku_word["cx"]
-                    and re.fullmatch(
-                        r"[$€£]\d+[.,]\d{2}",
-                        word["text"].strip(),
-                    )
-                )
-            ]
-
-            if (
-                numeric_left
-                and len(money_right) >= 2
+            if not any(
+                abs(sku_word["cy"] - row_y) <= 24
+                for row_y in matched_rows
             ):
-                count += 1
+                matched_rows.append(
+                    sku_word["cy"]
+                )
 
-        return count
+        return len(matched_rows)
 
     def resolve_product(
         self,
@@ -4399,6 +4999,47 @@ class FakturamaAutomation:
                 dialog,
                 matches[0],
             )
+
+            added_lines = self._count_order_sku_lines(
+                item.sku
+            )
+
+            if added_lines == 0:
+                # Do not claim selected_existing merely because the selector
+                # closed.  Retry the same exact SKU once; this handles an SWT
+                # row that received focus but did not activate on the first
+                # physical input.
+                retry_dialog = self.open_existing_product_selector()
+                retry_matches = self._product_selector_matches(
+                    retry_dialog,
+                    item.sku,
+                )
+
+                if len(retry_matches) != 1:
+                    self._cancel_product_selector(
+                        retry_dialog
+                    )
+
+                    raise FakturamaError(
+                        "Product selection did not add "
+                        f"'{item.sku}', and retry did not resolve "
+                        "exactly one Product row."
+                    )
+
+                self._select_product_match(
+                    retry_dialog,
+                    retry_matches[0],
+                )
+
+                added_lines = self._count_order_sku_lines(
+                    item.sku
+                )
+
+            if added_lines != 1:
+                raise FakturamaError(
+                    "The Product selector closed, but the Order grid "
+                    f"still does not contain exactly one '{item.sku}' row."
+                )
 
             return {
                 "action": "selected_existing",
@@ -4669,20 +5310,104 @@ class FakturamaAutomation:
         # ------------------------------------------------------------
         # 1. Prefer an exact SKU OCR anchor inside the Items grid.
         # ------------------------------------------------------------
-        sku_candidates = [
-            word
-            for word in items_words
-            if (
-                self._compact_ocr_token(
-                    word["text"]
-                )
-                == expected_sku
+        sku_candidates = []
+
+        for word in items_words:
+            raw_value = word["text"].strip()
+            compact_value = self._compact_ocr_token(
+                raw_value
             )
-        ]
+
+            if compact_value == expected_sku:
+                sku_candidates.append(
+                    (word, None)
+                )
+                continue
+
+            # On selected blue SWT rows Tesseract commonly merges the Qty
+            # and Item No. cells into one token, e.g.
+            # "1.00|CHR-ERG-01".  Split that live OCR box into a Qty segment
+            # and an SKU segment instead of searching for a missing Qty
+            # header or guessing the green-plus column.
+            if not compact_value.endswith(
+                expected_sku
+            ):
+                continue
+
+            upper_value = raw_value.upper()
+            sku_start = upper_value.find(
+                sku.upper()
+            )
+
+            if sku_start <= 0:
+                continue
+
+            qty_match = re.search(
+                r"\d+(?:[.,]\d+)?",
+                raw_value[:sku_start],
+            )
+
+            if qty_match is None:
+                continue
+
+            sku_ratio = (
+                sku_start
+                / max(1, len(raw_value))
+            )
+
+            sku_left = (
+                word["left"]
+                + word["width"] * sku_ratio
+            )
+
+            adjusted_sku = {
+                **word,
+                "text": sku,
+                "left": sku_left,
+                "width": max(
+                    1,
+                    word["left"]
+                    + word["width"]
+                    - sku_left,
+                ),
+                "cx": (
+                    sku_left
+                    + word["left"]
+                    + word["width"]
+                ) / 2,
+                "merged_qty_sku": True,
+            }
+
+            qty_left = word["left"]
+            qty_right = sku_left
+
+            qty_override = {
+                "text": qty_match.group(0),
+                "left": qty_left,
+                "top": word["top"],
+                "width": max(
+                    1,
+                    qty_right - qty_left,
+                ),
+                "height": word["height"],
+                "cx": (
+                    qty_left + qty_right
+                ) / 2,
+                "cy": word["cy"],
+                "inferred": False,
+                "merged_qty_sku": True,
+            }
+
+            sku_candidates.append(
+                (
+                    adjusted_sku,
+                    qty_override,
+                )
+            )
 
         selected = None
 
-        for sku_word in sku_candidates:
+        for sku_word, merged_qty in sku_candidates:
             row_words = row_words_at(
                 sku_word["cy"]
             )
@@ -4710,6 +5435,7 @@ class FakturamaAutomation:
                     "sku_word": sku_word,
                     "row_words": row_words,
                     "decimal_right": decimal_right,
+                    "qty_word_override": merged_qty,
                 }
 
         # ------------------------------------------------------------
@@ -4851,15 +5577,279 @@ class FakturamaAutomation:
 
                 break
 
+        # ------------------------------------------------------------
+        # 3. Source-order fallback: derive the Nth visible transaction row.
+        # ------------------------------------------------------------
+        # SWT selected rows can make both the SKU and Pos. text unreadable
+        # to Tesseract.  Product selection itself has already been verified
+        # exactly before line completion, and the task requires processing
+        # source rows in order.  Therefore, when the SKU/Pos anchors are
+        # unavailable, identify transaction rows from their numeric cells
+        # and use expected_position as the row ordinal.  No screen
+        # coordinates are hardcoded: row/column positions come from OCR.
+        if (
+            selected is None
+            and expected_position is not None
+        ):
+            # Cluster OCR words into horizontal lines inside the Items grid.
+            ordered_words = sorted(
+                items_words,
+                key=lambda word: (
+                    word["cy"],
+                    word["left"],
+                ),
+            )
+
+            clusters = []
+
+            for word in ordered_words:
+                target_cluster = None
+
+                for cluster in clusters:
+                    if abs(
+                        word["cy"]
+                        - cluster["cy"]
+                    ) <= 24:
+                        target_cluster = cluster
+                        break
+
+                if target_cluster is None:
+                    clusters.append(
+                        {
+                            "cy": word["cy"],
+                            "words": [word],
+                        }
+                    )
+                else:
+                    target_cluster["words"].append(
+                        word
+                    )
+                    target_cluster["cy"] = sum(
+                        item["cy"]
+                        for item in target_cluster["words"]
+                    ) / len(
+                        target_cluster["words"]
+                    )
+
+            transaction_rows = []
+
+            for cluster in clusters:
+                row = sorted(
+                    cluster["words"],
+                    key=lambda word: word["left"],
+                )
+
+                decimals = [
+                    word
+                    for word in row
+                    if decimal_token(word)
+                ]
+
+                decimals.sort(
+                    key=lambda word: word["cx"]
+                )
+
+                # A transaction row normally exposes Qty, U.Price,
+                # Discount and line Price as plain decimal tokens.  On a
+                # selected row Qty may disappear, leaving the final three.
+                if len(decimals) < 3:
+                    continue
+
+                transaction_rows.append(
+                    {
+                        "cy": cluster["cy"],
+                        "row_words": row,
+                        "decimals": decimals,
+                    }
+                )
+
+            transaction_rows.sort(
+                key=lambda row: row["cy"]
+            )
+
+            row_index = expected_position - 1
+
+            if (
+                0 <= row_index
+                < len(transaction_rows)
+            ):
+                chosen = transaction_rows[
+                    row_index
+                ]
+
+                decimals = chosen["decimals"]
+
+                # Final three plain decimal cells are always
+                # U.Price -> Discount -> line Price.
+                decimal_right = decimals[-3:]
+
+                # Use a real readable SKU token when possible; otherwise
+                # create a synthetic Item-No. anchor from the header.
+                readable_skus = [
+                    word
+                    for word in chosen["row_words"]
+                    if re.fullmatch(
+                        r"[A-Z0-9]+(?:-[A-Z0-9]+)+",
+                        word["text"].strip().upper(),
+                    )
+                ]
+
+                if readable_skus:
+                    synthetic_sku = readable_skus[0]
+                else:
+                    item_headers = [
+                        word
+                        for word in items_words
+                        if self._compact_ocr_token(
+                            word["text"]
+                        ) == "ITEM"
+                    ]
+
+                    no_headers = [
+                        word
+                        for word in items_words
+                        if self._compact_ocr_token(
+                            word["text"]
+                        ) == "NO"
+                    ]
+
+                    if item_headers and no_headers:
+                        item_header = min(
+                            item_headers,
+                            key=lambda word: word["cy"],
+                        )
+
+                        no_header = min(
+                            no_headers,
+                            key=lambda word: abs(
+                                word["cy"]
+                                - item_header["cy"]
+                            ),
+                        )
+
+                        item_no_x = (
+                            item_header["cx"]
+                            + no_header["cx"]
+                        ) / 2
+                    else:
+                        # Fall back to the left-most readable amount as a
+                        # row-local anchor.  Qty will be resolved separately.
+                        item_no_x = max(
+                            0,
+                            decimals[0]["cx"] + 60,
+                        )
+
+                    synthetic_sku = {
+                        "text": sku,
+                        "left": item_no_x - 30,
+                        "top": int(
+                            chosen["cy"] - 10
+                        ),
+                        "width": 60,
+                        "height": 20,
+                        "cx": item_no_x,
+                        "cy": chosen["cy"],
+                        "inferred": True,
+                    }
+
+                # Resolve Qty independently from SKU visibility.  When
+                # four plain decimal cells are readable, the left-most of
+                # the final four is Qty.  If selected-row rendering hides
+                # Qty, infer only its X position from another row or the Qty
+                # header and let final verification infer its effective value
+                # from line = qty * unit * (1 - discount/100).
+                if len(decimals) >= 4:
+                    qty_override = decimals[-4]
+                else:
+                    qty_x_candidates = []
+
+                    for other in transaction_rows:
+                        if other is chosen:
+                            continue
+
+                        other_decimals = other["decimals"]
+
+                        if len(other_decimals) >= 4:
+                            qty_x_candidates.append(
+                                other_decimals[-4]["cx"]
+                            )
+
+                    if not qty_x_candidates:
+                        qty_headers = [
+                            word
+                            for word in items_words
+                            if self._compact_ocr_token(
+                                word["text"]
+                            ) == "QTY"
+                        ]
+
+                        qty_x_candidates.extend(
+                            word["cx"]
+                            for word in qty_headers
+                        )
+
+                    if qty_x_candidates:
+                        qty_x_candidates.sort()
+                        qty_cx = qty_x_candidates[
+                            len(qty_x_candidates) // 2
+                        ]
+
+                        qty_override = {
+                            "text": None,
+                            "left": qty_cx - 20,
+                            "top": int(chosen["cy"] - 10),
+                            "width": 40,
+                            "height": 20,
+                            "cx": qty_cx,
+                            "cy": chosen["cy"],
+                            "inferred": True,
+                        }
+                    else:
+                        qty_override = None
+
+                selected = {
+                    "sku_word": synthetic_sku,
+                    "row_words": chosen["row_words"],
+                    "decimal_right": decimal_right,
+                    "qty_word_override": qty_override,
+                    "ordinal_fallback": True,
+                }
+
         if selected is None:
-            debug = " || ".join(
-                " | ".join(
-                    word["text"]
-                    for word in row_words_at(
-                        candidate["cy"]
+            # Include every OCR line in the Items region in the error so a
+            # future failure is diagnosable without another special script.
+            debug_lines = []
+
+            seen_y = []
+
+            for word in sorted(
+                items_words,
+                key=lambda item: (
+                    item["cy"],
+                    item["left"],
+                ),
+            ):
+                if any(
+                    abs(word["cy"] - y) <= 24
+                    for y in seen_y
+                ):
+                    continue
+
+                seen_y.append(
+                    word["cy"]
+                )
+
+                debug_lines.append(
+                    " | ".join(
+                        item["text"]
+                        for item in row_words_at(
+                            word["cy"]
+                        )
                     )
                 )
-                for candidate in sku_candidates
+
+            debug = " || ".join(
+                debug_lines
             )
 
             raise FakturamaError(
@@ -4909,7 +5899,9 @@ class FakturamaAutomation:
             )
         ]
 
-        qty_word = None
+        qty_word = selected.get(
+            "qty_word_override"
+        )
 
         # Pos. is an integer; Qty normally has decimals. Prefer decimals.
         decimal_qty = [
@@ -4921,7 +5913,7 @@ class FakturamaAutomation:
             )
         ]
 
-        if decimal_qty:
+        if qty_word is None and decimal_qty:
             qty_word = max(
                 decimal_qty,
                 key=lambda word: word["cx"],
@@ -4985,6 +5977,80 @@ class FakturamaAutomation:
                 )
 
             if not qty_x_candidates:
+                # Qty is the column immediately between Pos. and Item No.
+                # When SWT paints a selected row, Tesseract can miss both
+                # the Qty value and the tiny "Qty." header.  The row's Pos.
+                # integer and exact SKU are still sufficient to derive the
+                # live column centre without any fixed screen coordinate.
+                position_candidates = [
+                    word
+                    for word in numeric_left
+                    if re.fullmatch(
+                        r"\d+",
+                        word["text"].strip(),
+                    )
+                ]
+
+                if position_candidates:
+                    position_word = min(
+                        position_candidates,
+                        key=lambda word: word["cx"],
+                    )
+
+                    left_boundary = position_word["cx"]
+                    right_boundary = sku_word["left"]
+
+                    if right_boundary > left_boundary:
+                        qty_x_candidates.append(
+                            (
+                                left_boundary
+                                + right_boundary
+                            ) / 2
+                        )
+
+            if not qty_x_candidates:
+                # Last structural fallback: use the painted Pos. and Item No.
+                # header locations.  This still adapts to window size and DPI
+                # because both boundaries come from the current screenshot.
+                pos_headers = [
+                    word
+                    for word in items_words
+                    if self._compact_ocr_token(
+                        word["text"]
+                    ) == "POS"
+                ]
+
+                item_headers = [
+                    word
+                    for word in items_words
+                    if self._compact_ocr_token(
+                        word["text"]
+                    ) == "ITEM"
+                ]
+
+                if pos_headers and item_headers:
+                    pos_header = min(
+                        pos_headers,
+                        key=lambda word: word["cy"],
+                    )
+
+                    item_header = min(
+                        item_headers,
+                        key=lambda word: abs(
+                            word["cy"]
+                            - pos_header["cy"]
+                        ),
+                    )
+
+                    if item_header["left"] > pos_header["cx"]:
+                        qty_x_candidates.append(
+                            (
+                                pos_header["cx"]
+                                + item_header["left"]
+                            ) / 2
+                        )
+
+            if not qty_x_candidates:
                 raise FakturamaError(
                     f"Order row for '{sku}' was found, "
                     "but the Qty column could not be located."
@@ -5030,11 +6096,39 @@ class FakturamaAutomation:
     ):
         window_rect = self.window.rectangle()
 
+        # OCR coordinates belong to the captured image, while pywinauto's
+        # rectangle belongs to the Windows desktop coordinate system.  They
+        # differ when display scaling is enabled.  Convert through the live
+        # capture dimensions before clicking the Qty/U.Price/Discount cell;
+        # otherwise the calculated point can land on the green plus beside
+        # the Items grid.
+        image = self.window.capture_as_image()
+
+        scale_x = (
+            window_rect.width()
+            / image.width
+        )
+        scale_y = (
+            window_rect.height()
+            / image.height
+        )
+
+        image_x = word["cx"] / scale
+        image_y = word["cy"] / scale
+
         return (
-            window_rect.left
-            + int(word["cx"] / scale),
-            window_rect.top
-            + int(word["cy"] / scale),
+            int(
+                round(
+                    window_rect.left
+                    + image_x * scale_x
+                )
+            ),
+            int(
+                round(
+                    window_rect.top
+                    + image_y * scale_y
+                )
+            ),
         )
 
     def _find_edit_at_screen_point(
@@ -5401,66 +6495,942 @@ class FakturamaAutomation:
 
         return results
 
+    # ============================================================
+    # Order save + persisted Documents verification
+    # ============================================================
+
+    def _click_toolbar_button_physically(
+        self,
+        button_name: str,
+    ):
+        """
+        Click a visible top-toolbar action using OCR grounding.
+
+        Fakturama's Win32 wrapper for the toolbar can expose geometry that
+        does not correspond to the painted SWT toolbar. During live testing,
+        the semantically resolved Save control pointed to the menu-bar area
+        and did not persist the document. OCR grounding of the visible
+        toolbar label reproduced the successful manual Save.
+
+        This remains layout-independent: the target is discovered from the
+        currently rendered toolbar text and constrained to the top portion
+        of the Fakturama window.
+        """
+        self.require_connection()
+
+        image = self.window.capture_as_image()
+
+        # Do not define the toolbar as a fixed percentage of the whole
+        # window.  On a short/restored Fakturama window the painted toolbar
+        # can be below 16% of the image height even though it is fully
+        # visible.  Use a generous top band, then choose the highest matching
+        # label; toolbar captions are always above document/editor tabs.
+        top_limit = min(
+            320,
+            max(
+                180,
+                int(image.height * 0.40),
+            ),
+        )
+
+        def normalized(value: str) -> str:
+            return re.sub(
+                r"[^a-z0-9]",
+                "",
+                value.casefold(),
+            ).replace("0", "o")
+
+        def edit_distance(left: str, right: str) -> int:
+            previous = list(
+                range(len(right) + 1)
+            )
+
+            for row, left_char in enumerate(
+                left,
+                start=1,
+            ):
+                current = [row]
+
+                for column, right_char in enumerate(
+                    right,
+                    start=1,
+                ):
+                    current.append(
+                        min(
+                            current[-1] + 1,
+                            previous[column] + 1,
+                            previous[column - 1]
+                            + (left_char != right_char),
+                        )
+                    )
+
+                previous = current
+
+            return previous[-1]
+
+        target_name = normalized(button_name)
+        matches = []
+
+        # SWT toolbar text can be segmented differently depending on display
+        # scaling.  Try both a normal block pass and sparse-text pass, then
+        # repeat against a high-contrast 2x image.
+        enhanced = ImageOps.autocontrast(
+            ImageOps.grayscale(image)
+        ).resize(
+            (
+                image.width * 2,
+                image.height * 2,
+            )
+        )
+
+        ocr_passes = (
+            (image, 1, 6),
+            (image, 1, 11),
+            (enhanced, 2, 6),
+            (enhanced, 2, 11),
+        )
+
+        for ocr_image, scale, page_mode in ocr_passes:
+            try:
+                data = pytesseract.image_to_data(
+                    ocr_image,
+                    lang="eng",
+                    config=(
+                        f"--oem 3 --psm {page_mode}"
+                    ),
+                    output_type=Output.DICT,
+                )
+            except Exception:
+                continue
+
+            for index, raw_text in enumerate(data["text"]):
+                value = normalized(raw_text.strip())
+
+                if not value:
+                    continue
+
+                distance = edit_distance(
+                    value,
+                    target_name,
+                )
+
+                # Permit one OCR-character error (for example 0rder), but
+                # only for similarly sized words inside the top band.
+                if (
+                    distance > 1
+                    or abs(len(value) - len(target_name)) > 1
+                ):
+                    continue
+
+                left = int(data["left"][index]) / scale
+                top = int(data["top"][index]) / scale
+                width = int(data["width"][index]) / scale
+                height = int(data["height"][index]) / scale
+
+                if top > top_limit:
+                    continue
+
+                matches.append(
+                    {
+                        "left": left,
+                        "top": top,
+                        "width": width,
+                        "height": height,
+                        "distance": distance,
+                    }
+                )
+
+        if not matches:
+            screenshot = (
+                "artifacts/screenshots/"
+                f"toolbar_{button_name.casefold()}_failure.png"
+            )
+
+            try:
+                Path(screenshot).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                image.save(screenshot)
+            except Exception:
+                pass
+
+            raise FakturamaError(
+                f"Could not OCR-locate the visible top-toolbar "
+                f"'{button_name}' label. Diagnostic screenshot: "
+                f"{screenshot}"
+            )
+
+        target = min(
+            matches,
+            key=lambda match: (
+                match["distance"],
+                match["top"],
+            ),
+        )
+        window_rect = self.window.rectangle()
+
+        # capture_as_image() pixels and Win32 window coordinates are not
+        # guaranteed to use the same DPI scale.  Map the OCR point from image
+        # space into the actual window rectangle before sending the click.
+        scale_x = window_rect.width() / image.width
+        scale_y = window_rect.height() / image.height
+
+        image_x = (
+            target["left"]
+            + target["width"] / 2
+        )
+        image_y = (
+            target["top"]
+            + target["height"] / 2
+        )
+
+        x = int(
+            round(
+                window_rect.left
+                + image_x * scale_x
+            )
+        )
+        y = int(
+            round(
+                window_rect.top
+                + image_y * scale_y
+            )
+        )
+
+        try:
+            mouse.click(
+                button="left",
+                coords=(x, y),
+            )
+            return
+
+        except Exception as physical_exc:
+            # Some Windows/DPI combinations reject SetCursorPos even for a
+            # visible target.  Fall back to a message-based click on the
+            # smallest visible child control containing the OCR point; this
+            # does not move the system cursor.
+            containing_controls = []
+
+            for control in self.visible_controls():
+                try:
+                    rect = control.rectangle()
+
+                    if not (
+                        rect.left <= x <= rect.right
+                        and rect.top <= y <= rect.bottom
+                    ):
+                        continue
+
+                    area = max(
+                        1,
+                        rect.width() * rect.height(),
+                    )
+
+                    containing_controls.append(
+                        (area, control, rect)
+                    )
+
+                except Exception:
+                    continue
+
+            containing_controls.sort(
+                key=lambda item: item[0]
+            )
+
+            for _, control, rect in containing_controls:
+                try:
+                    control.click(
+                        button="left",
+                        coords=(
+                            x - rect.left,
+                            y - rect.top,
+                        ),
+                    )
+                    return
+                except Exception:
+                    continue
+
+            raise FakturamaError(
+                f"Located top-toolbar '{button_name}', but Windows "
+                f"rejected the click at mapped point ({x}, {y})."
+            ) from physical_exc
+
+
+    def _open_documents_list(self):
+        """
+        Open Data > Documents without fixed screen coordinates.
+
+        Strategy:
+        1) Prefer OCR grounding of the visible 'Documents' label.
+        2) If OCR misses the label, use the SWT navigation hierarchy:
+           find the left navigation container and click its top-most
+           contained navigation entry. In Fakturama, Documents is the
+           first entry in the Data navigation group.
+
+        The fallback is structural/layout-relative, not a fixed x/y click.
+        """
+        image = self.window.capture_as_image()
+        window_rect = self.window.rectangle()
+
+        # --------------------------------------------------------
+        # 1. OCR-grounded navigation
+        # --------------------------------------------------------
+        try:
+            data = pytesseract.image_to_data(
+                image,
+                lang="eng",
+                config="--oem 3 --psm 6",
+                output_type=Output.DICT,
+            )
+
+            hits = []
+
+            for i, raw in enumerate(data["text"]):
+                value = raw.strip()
+
+                if value.casefold() != "documents":
+                    continue
+
+                hits.append(
+                    {
+                        "left": int(data["left"][i]),
+                        "top": int(data["top"][i]),
+                        "width": int(data["width"][i]),
+                        "height": int(data["height"][i]),
+                    }
+                )
+
+            if hits:
+                target = min(
+                    hits,
+                    key=lambda hit: hit["left"],
+                )
+
+                screen_x = (
+                    window_rect.left
+                    + target["left"]
+                    + target["width"] // 2
+                )
+                screen_y = (
+                    window_rect.top
+                    + target["top"]
+                    + target["height"] // 2
+                )
+
+                candidates = []
+
+                for control in self.window.descendants():
+                    try:
+                        if not control.is_visible():
+                            continue
+
+                        if control.class_name() != "SWT_Window0":
+                            continue
+
+                        rect = control.rectangle()
+
+                        if not (
+                            rect.left <= screen_x <= rect.right
+                            and rect.top <= screen_y <= rect.bottom
+                        ):
+                            continue
+
+                        area = max(
+                            1,
+                            (rect.right - rect.left)
+                            * (rect.bottom - rect.top),
+                        )
+
+                        candidates.append(
+                            (area, control)
+                        )
+
+                    except Exception:
+                        continue
+
+                if candidates:
+                    candidates.sort(
+                        key=lambda item: item[0]
+                    )
+
+                    candidates[0][1].click_input()
+                    time.sleep(0.8)
+                    return
+
+        except Exception:
+            pass
+
+        # --------------------------------------------------------
+        # 2. Structural SWT fallback
+        # --------------------------------------------------------
+        swt_controls = []
+
+        for control in self.window.descendants():
+            try:
+                if not control.is_visible():
+                    continue
+
+                if control.class_name() != "SWT_Window0":
+                    continue
+
+                rect = control.rectangle()
+
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
+
+                if width <= 0 or height <= 0:
+                    continue
+
+                swt_controls.append(
+                    (control, rect)
+                )
+
+            except Exception:
+                continue
+
+        # Candidate navigation containers live in the left portion of the
+        # window, are relatively tall, and contain several smaller SWT
+        # navigation entries.
+        container_candidates = []
+
+        window_width = max(
+            1,
+            window_rect.right - window_rect.left,
+        )
+
+        for parent, parent_rect in swt_controls:
+            parent_width = (
+                parent_rect.right - parent_rect.left
+            )
+            parent_height = (
+                parent_rect.bottom - parent_rect.top
+            )
+
+            if parent_height < 180:
+                continue
+
+            if parent_width > window_width * 0.30:
+                continue
+
+            if parent_rect.left > (
+                window_rect.left + window_width * 0.30
+            ):
+                continue
+
+            children = []
+
+            for child, child_rect in swt_controls:
+                if child is parent:
+                    continue
+
+                if not (
+                    parent_rect.left <= child_rect.left
+                    and child_rect.right <= parent_rect.right
+                    and parent_rect.top <= child_rect.top
+                    and child_rect.bottom <= parent_rect.bottom
+                ):
+                    continue
+
+                child_height = (
+                    child_rect.bottom - child_rect.top
+                )
+
+                # Navigation entries are short horizontal rows.
+                if not (18 <= child_height <= 45):
+                    continue
+
+                children.append(
+                    (child, child_rect)
+                )
+
+            if len(children) >= 3:
+                container_candidates.append(
+                    (
+                        len(children),
+                        parent_height,
+                        children,
+                    )
+                )
+
+        if not container_candidates:
+            raise FakturamaError(
+                "Could not locate the Data navigation structure "
+                "needed to open Documents."
+            )
+
+        # Prefer the container with the most navigation rows, then the
+        # taller one. Documents is the first/top-most row in this group.
+        container_candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+            ),
+            reverse=True,
+        )
+
+        children = container_candidates[0][2]
+
+        children.sort(
+            key=lambda item: (
+                item[1].top,
+                item[1].left,
+            )
+        )
+
+        documents_control = children[0][0]
+
+        documents_control.click_input()
+        time.sleep(0.8)
+
+
+    @staticmethod
+    def _compact_ocr(value: str) -> str:
+        return re.sub(
+            r"[^A-Z0-9]",
+            "",
+            str(value).upper(),
+        )
+
+    def _document_number_present(
+        self,
+        raw: str,
+        document_number: str,
+    ) -> bool:
+        compact_raw = self._compact_ocr(
+            raw
+        )
+
+        expected = self._compact_ocr(
+            document_number
+        )
+
+        if expected in compact_raw:
+            return True
+
+        # Tesseract commonly confuses the letter O with zero in PO/INV
+        # document numbers.
+        alternate = expected.replace(
+            "O",
+            "0",
+        )
+
+        if alternate in compact_raw:
+            return True
+
+        # In the saved Documents row, Tesseract can drop the leading P and
+        # read the O in PO as another zero.  For example:
+        #
+        #     PO000008 -> 0000008
+        #
+        # Accept that exact OCR token only.  The caller still requires the
+        # same filtered row to match Date, Cust.Ref., state and Total, so this
+        # does not weaken persisted-document identity verification.
+        prefix_match = re.match(
+            r"^[A-Z]+",
+            expected,
+        )
+        prefix = (
+            prefix_match.group(0)
+            if prefix_match
+            else ""
+        )
+        digits = re.sub(
+            r"\D",
+            "",
+            expected,
+        )
+
+        tolerated_tokens = {
+            expected,
+            alternate,
+        }
+
+        if digits:
+            tolerated_tokens.add(digits)
+
+            if "O" in prefix:
+                tolerated_tokens.add(
+                    "0" + digits
+                )
+
+        observed_tokens = {
+            self._compact_ocr(token)
+            for token in re.findall(
+                r"[A-Z0-9]+",
+                str(raw).upper(),
+            )
+        }
+
+        return bool(
+            tolerated_tokens
+            & observed_tokens
+        )
+
+    def _filtered_documents_ocr(
+        self,
+        document_number: str,
+    ):
+        """
+        Search the currently active Documents list and OCR only its lower
+        list region, anchored to that list's Search control.
+        """
+        search = self._find_edit_for_label(
+            "Search:"
+        )
+
+        search.set_focus()
+        search.set_edit_text(
+            document_number
+        )
+
+        time.sleep(0.8)
+
+        image = self.window.capture_as_image()
+
+        window_rect = self.window.rectangle()
+        search_rect = search.rectangle()
+
+        crop_top = max(
+            0,
+            search_rect.bottom
+            - window_rect.top
+            + 8,
+        )
+
+        lower = image.crop(
+            (
+                0,
+                crop_top,
+                image.width,
+                image.height,
+            )
+        )
+
+        raw = pytesseract.image_to_string(
+            lower,
+            lang="eng",
+            config="--oem 3 --psm 6",
+        )
+
+        return search, image, raw
+
+    def verify_saved_order_in_documents(
+        self,
+        order,
+        order_number: str,
+    ):
+        """
+        Verify the saved source Order in Data > Documents.
+        """
+        self._open_documents_list()
+
+        search, image, raw = (
+            self._filtered_documents_ocr(
+                order_number
+            )
+        )
+
+        compact = self._compact_ocr(
+            raw
+        )
+
+        expected_date = self._compact_ocr(
+            order.order_date.strftime(
+                "%b %d, %Y"
+            )
+        )
+
+        expected_ref = self._compact_ocr(
+            order.external_reference
+        )
+
+        expected_total = self._compact_ocr(
+            f"{Decimal(str(order.source_gross_total)):.2f}"
+        )
+
+        checks = {
+            "Order number": self._document_number_present(
+                raw,
+                order_number,
+            ),
+            "Date": expected_date in compact,
+            "Cust.Ref.": expected_ref in compact,
+            "Open state": "OPEN" in compact,
+            "Total": expected_total in compact,
+        }
+
+        Path(
+            "artifacts/screenshots"
+        ).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        image.save(
+            "artifacts/screenshots/"
+            "final_order_documents_verified.png"
+        )
+
+        try:
+            search.set_focus()
+            search.set_edit_text("")
+        except Exception:
+            pass
+
+        failed = [
+            label
+            for label, passed in checks.items()
+            if not passed
+        ]
+
+        if failed:
+            raise FakturamaError(
+                "Order was not fully verified in Data > Documents. "
+                "Missing checks: "
+                + ", ".join(failed)
+                + ". OCR was: "
+                + repr(raw)
+            )
+
+        return {
+            "order_number": order_number,
+            "date": order.order_date,
+            "cust_ref": order.external_reference,
+            "state": "open",
+            "total": Decimal(
+                str(order.source_gross_total)
+            ).quantize(
+                Decimal("0.01")
+            ),
+        }
+
+    def save_and_verify_order(
+        self,
+        order,
+        order_number: str,
+    ):
+        """
+        Save the current Order exactly once, then prove that it persisted.
+
+        The save is considered successful only if the exact generated Order
+        can subsequently be found in Data > Documents with the expected
+        Date, Cust.Ref., open state, and Total.
+        """
+        self._activate_open_order_editor()
+
+        observed_number = (
+            self.find_generated_order_number()
+        )
+
+        if observed_number != order_number:
+            raise FakturamaError(
+                "Refusing to save: active Order number changed. "
+                f"Expected {order_number}, observed {observed_number}."
+            )
+
+        observed_ref = self._find_edit_for_label(
+            "Cust.Ref."
+        ).window_text().strip()
+
+        if observed_ref != order.external_reference:
+            raise FakturamaError(
+                "Refusing to save: Cust.Ref. does not match source. "
+                f"Expected '{order.external_reference}', "
+                f"observed '{observed_ref}'."
+            )
+
+        # Exactly one toolbar Save action.
+        self._click_toolbar_button_physically(
+            "Save"
+        )
+
+        time.sleep(2.0)
+
+        # The editor must remain the same generated Order.
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Order editor disappeared after Save."
+            )
+
+        after_save_number = (
+            self.find_generated_order_number()
+        )
+
+        if after_save_number != order_number:
+            raise FakturamaError(
+                "Order number changed after Save. "
+                f"Expected {order_number}, "
+                f"observed {after_save_number}."
+            )
+
+        verified = (
+            self.verify_saved_order_in_documents(
+                order,
+                order_number,
+            )
+        )
+
+        # Requirement 4.6 starts from the still-open saved Order.
+        self._activate_open_order_editor()
+
+        return verified
+
+
+    def _find_numeric_edit_for_label(
+        self,
+        label_text: str,
+        *,
+        prefer_bottom: bool = False,
+    ):
+        """
+        Resolve a displayed numeric value by its visible label.
+
+        Fakturama exposes the totals as real SWT Static/Edit controls, so
+        use those semantic controls instead of OCRing the totals area.
+        """
+        labels = []
+
+        for control in self.window.descendants():
+            try:
+                if not control.is_visible():
+                    continue
+
+                if control.class_name() != "Static":
+                    continue
+
+                if control.window_text().strip() != label_text:
+                    continue
+
+                labels.append(control)
+
+            except Exception:
+                continue
+
+        if not labels:
+            raise FakturamaError(
+                f"Could not find label '{label_text}'."
+            )
+
+        labels.sort(
+            key=lambda control: control.rectangle().top,
+            reverse=prefer_bottom,
+        )
+
+        for label in labels:
+            label_rect = label.rectangle()
+            label_center_y = (
+                label_rect.top + label_rect.bottom
+            ) / 2
+
+            candidates = []
+
+            for control in self.window.descendants():
+                try:
+                    if not control.is_visible():
+                        continue
+
+                    if control.class_name() != "Edit":
+                        continue
+
+                    rect = control.rectangle()
+
+                    if rect.left < label_rect.right:
+                        continue
+
+                    center_y = (
+                        rect.top + rect.bottom
+                    ) / 2
+
+                    vertical_distance = abs(
+                        center_y - label_center_y
+                    )
+
+                    if vertical_distance > 18:
+                        continue
+
+                    horizontal_distance = (
+                        rect.left - label_rect.right
+                    )
+
+                    candidates.append(
+                        (
+                            vertical_distance,
+                            horizontal_distance,
+                            control,
+                        )
+                    )
+
+                except Exception:
+                    continue
+
+            if candidates:
+                candidates.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                    )
+                )
+
+                return candidates[0][2]
+
+        raise FakturamaError(
+            f"Could not find numeric value beside '{label_text}'."
+        )
+
     def verify_order_totals(
         self,
         order,
     ):
         """
-        Verify Order Total Net, VAT and Total using OCR of the totals area.
+        Verify Order Total Net, VAT and Total from Fakturama's exposed
+        SWT Edit controls. OCR is deliberately not used here because
+        selected rows can make the totals-area OCR unstable.
         """
-        _, _, raw_text = self._order_ocr_words()
-
-        normalized = re.sub(
-            r"[ \t]+",
-            " ",
-            raw_text,
-        )
-
-        total_net_match = re.search(
-            r"Total Net\s*[$€£]?\s*"
-            r"([0-9]+[.,][0-9]{2})",
-            normalized,
-            re.IGNORECASE,
-        )
-
-        if not total_net_match:
-            raise FakturamaError(
-                "Could not read Order Total Net."
+        total_net_control = (
+            self._find_numeric_edit_for_label(
+                "Total Net"
             )
-
-        after_net = normalized[
-            total_net_match.end():
-        ]
-
-        vat_match = re.search(
-            r"(?:^|\n)\s*VAT\s*[$€£]?\s*"
-            r"([0-9]+[.,][0-9]{2})",
-            after_net,
-            re.IGNORECASE,
         )
 
-        total_match = re.search(
-            r"(?:^|\n)\s*Total\s*[$€£]?\s*"
-            r"([0-9]+[.,][0-9]{2})",
-            after_net,
-            re.IGNORECASE,
-        )
-
-        if not vat_match or not total_match:
-            raise FakturamaError(
-                "Could not read Order VAT/Total values."
+        # There are two visible VAT labels in an Order: the VAT-mode label
+        # near the header and the monetary VAT total near the bottom.
+        # Select the lower one.
+        vat_control = (
+            self._find_numeric_edit_for_label(
+                "VAT",
+                prefer_bottom=True,
             )
-
-        observed_net = self._ocr_decimal(
-            total_net_match.group(1)
         )
 
-        observed_vat = self._ocr_decimal(
-            vat_match.group(1)
+        total_control = (
+            self._find_numeric_edit_for_label(
+                "Total"
+            )
         )
 
-        observed_total = self._ocr_decimal(
-            total_match.group(1)
+        observed_net = (
+            self._decimal_from_control_text(
+                total_net_control.window_text()
+            ).quantize(
+                Decimal("0.01")
+            )
+        )
+
+        observed_vat = (
+            self._decimal_from_control_text(
+                vat_control.window_text()
+            ).quantize(
+                Decimal("0.01")
+            )
+        )
+
+        observed_total = (
+            self._decimal_from_control_text(
+                total_control.window_text()
+            ).quantize(
+                Decimal("0.01")
+            )
         )
 
         expected_net = Decimal(
