@@ -14,17 +14,16 @@ The screenshot shows the newly opened Order, generated Order number, customer re
 
 The Product selector shows the required SKU row selected before the automation confirms the selection.
 
-## 3. Completed Order items
+## 3. Completed Fakturama Order items and totals
 
-![Completed Order items](../artifacts/screenshots/items_processed.png)
+![Completed Fakturama Order](../artifacts/screenshots/order_lines_final_verified.png)
 
-The completed Order contains:
+The Fakturama Order contains both source items:
 
 - `CHR-ERG-01`: quantity `2.00`, unit net `250.00`, VAT `19%`, discount `10.00%`, line net `450.00`.
 - `MAT-DESK-02`: quantity `3.00`, unit net `40.00`, VAT `19%`, discount `0.00%`, line net `120.00`.
 
-The expected totals are Total Net `570.00`, VAT `108.30`, and Total `678.30`.
-
+The displayed totals are Total Net `570.00`, VAT `108.30`, and Total `678.30`.
 ## 4. Persisted Order verification
 
 ![Persisted Order](../artifacts/screenshots/final_order_documents_verified.png)
