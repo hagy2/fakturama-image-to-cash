@@ -1,9 +1,12 @@
+import calendar
+import time
+
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
-import time
-from datetime import date
 
 from pywinauto import Desktop, mouse
+from pywinauto.keyboard import send_keys
 
 
 class FakturamaError(RuntimeError):
@@ -16,20 +19,43 @@ class FakturamaAutomation:
         self.window = None
 
     def connect(self):
-        """Connect to an already-running Fakturama window."""
+        """
+        Connect to an already-running Fakturama window and ensure
+        it is restored before controls are inspected.
+        """
         try:
             window = Desktop(backend="win32").window(
                 title_re=self.title_pattern
             )
 
             window.wait(
-                "exists visible",
+                "exists",
+                timeout=10,
+            )
+
+            # Windows places minimized windows near (-32000, -32000).
+            # Restore Fakturama before using control geometry.
+            try:
+                if window.is_minimized():
+                    window.restore()
+                    time.sleep(0.5)
+            except Exception:
+                pass
+
+            try:
+                window.set_focus()
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            window.wait(
+                "visible",
                 timeout=10,
             )
 
         except Exception as exc:
             raise FakturamaError(
-                "Could not find a visible Fakturama window."
+                "Could not find or restore a visible Fakturama window."
             ) from exc
 
         self.window = window
@@ -337,9 +363,7 @@ class FakturamaAutomation:
 
         return candidates[0][1]
     def set_order_date(self, order_date: date):
-        """
-        Set the Order Date and verify it by reading the field back.
-        """
+       
         self.require_connection()
 
         if not self.is_order_editor_open():
@@ -350,7 +374,6 @@ class FakturamaAutomation:
 
         field = self._find_edit_for_label("Date")
 
-        
         expected = (
             f"{order_date.strftime('%b')} "
             f"{order_date.day}, "
@@ -358,27 +381,345 @@ class FakturamaAutomation:
         )
 
         try:
-            field.set_focus()
-            field.set_edit_text(expected)
+            field.click_input()
+
+            # Move to the first date segment.
+            field.type_keys("{HOME}")
+
+            # Month
+            field.type_keys(
+                f"{order_date.month:02d}"
+            )
+
+            # Move to day.
+            field.type_keys("{RIGHT}")
+
+            # Day
+            field.type_keys(
+                f"{order_date.day:02d}"
+            )
+
+            # Move to year.
+            field.type_keys("{RIGHT}")
+
+            # Year
+            field.type_keys(
+                str(order_date.year)
+            )
+
+            # Commit the control.
+            field.type_keys("{TAB}")
+
+            time.sleep(0.5)
 
         except Exception as exc:
             raise FakturamaError(
-                "Could not write the Order Date."
+                "Could not set and commit the Order Date."
             ) from exc
+
+        observed = field.window_text().strip()
+
+        if observed != expected:
+            raise FakturamaError(
+                "Order Date verification failed after commit: "
+                f"expected '{expected}', "
+                f"observed '{observed}'."
+            )
+
+        return observed
+    def get_order_date_text(self) -> str:
+        """Read the currently displayed Order Date."""
+        self.require_connection()
+
+        field = self._find_edit_for_label("Date")
+
+        return field.window_text().strip()
+
+    def _open_order_date_calendar(self):
+    
+        self.require_connection()
+
+        field = self._find_edit_for_label("Date")
+        field_rect = field.rectangle()
+
+        containers = []
+
+        for control in self.visible_controls():
+            try:
+                if control.class_name() != "SWT_Window0":
+                    continue
+
+                rect = control.rectangle()
+
+                contains_field = (
+                    rect.left <= field_rect.left
+                    and rect.top <= field_rect.top
+                    and rect.right >= field_rect.right
+                    and rect.bottom >= field_rect.bottom
+                )
+
+                extends_right = (
+                    rect.right > field_rect.right
+                )
+
+                if not (
+                    contains_field
+                    and extends_right
+                ):
+                    continue
+
+                area = (
+                    rect.width()
+                    * rect.height()
+                )
+
+                containers.append(
+                    (area, rect)
+                )
+
+            except Exception:
+                continue
+
+        if not containers:
+            raise FakturamaError(
+                "Could not locate the Order Date calendar container."
+            )
+
+        containers.sort(
+            key=lambda item: item[0]
+        )
+
+        container_rect = containers[0][1]
+
+        click_x = int(
+            (
+                field_rect.right
+                + container_rect.right
+            )
+            / 2
+        )
+
+        click_y = int(
+            (
+                container_rect.top
+                + container_rect.bottom
+            )
+            / 2
+        )
+
+        mouse.click(
+            button="left",
+            coords=(click_x, click_y),
+        )
+
+        time.sleep(0.4)
+
+    def set_order_date(self, target_date: date):
+  
+        self.require_connection()
+
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Cannot set Order Date: "
+                "no verified Order editor is open."
+            )
+
+        field = self._find_edit_for_label("Date")
+
+        current_text = field.window_text().strip()
 
         try:
-            observed = field.window_text().strip()
+            current_date = datetime.strptime(
+                current_text,
+                "%b %d, %Y",
+            ).date()
 
-        except Exception as exc:
+        except ValueError as exc:
             raise FakturamaError(
-                "Could not read Order Date back."
+                "Could not parse current Fakturama Order Date: "
+                f"'{current_text}'."
             ) from exc
+
+        expected = (
+            f"{target_date.strftime('%b')} "
+            f"{target_date.day}, "
+            f"{target_date.year}"
+        )
+
+        # Already correct.
+        if current_date == target_date:
+            return current_text
+
+        self._open_order_date_calendar()
+
+        month_delta = (
+            (target_date.year - current_date.year) * 12
+            + target_date.month
+            - current_date.month
+        )
+
+        selected_year = current_date.year
+        selected_month = current_date.month
+        selected_day = current_date.day
+
+        if month_delta > 0:
+            for _ in range(month_delta):
+                send_keys("{PGDN}")
+                time.sleep(0.08)
+
+                selected_month += 1
+
+                if selected_month > 12:
+                    selected_month = 1
+                    selected_year += 1
+
+                selected_day = min(
+                    selected_day,
+                    calendar.monthrange(
+                        selected_year,
+                        selected_month,
+                    )[1],
+                )
+
+        elif month_delta < 0:
+            for _ in range(abs(month_delta)):
+                send_keys("{PGUP}")
+                time.sleep(0.08)
+
+                selected_month -= 1
+
+                if selected_month < 1:
+                    selected_month = 12
+                    selected_year -= 1
+
+                selected_day = min(
+                    selected_day,
+                    calendar.monthrange(
+                        selected_year,
+                        selected_month,
+                    )[1],
+                )
+
+        day_delta = (
+            target_date.day
+            - selected_day
+        )
+
+        if day_delta > 0:
+            send_keys(
+                f"{{RIGHT {day_delta}}}"
+            )
+
+        elif day_delta < 0:
+            send_keys(
+                f"{{LEFT {abs(day_delta)}}}"
+            )
+
+        send_keys("{ENTER}")
+
+        time.sleep(0.6)
+
+        observed = field.window_text().strip()
 
         if observed != expected:
             raise FakturamaError(
                 "Order Date verification failed: "
                 f"expected '{expected}', "
                 f"observed '{observed}'."
+            )
+
+        return observed
+
+        return field.window_text().strip()
+    def _find_combobox_with_text(self, text: str):
+        """
+        Find exactly one visible ComboBox whose current text matches.
+        """
+        matches = []
+
+        for control in self._visible_controls_by_class("ComboBox"):
+            try:
+                if control.window_text().strip() == text:
+                    matches.append(control)
+            except Exception:
+                continue
+
+        if len(matches) == 0:
+            raise FakturamaError(
+                f"Could not find visible ComboBox with value '{text}'."
+            )
+
+        if len(matches) > 1:
+            raise FakturamaError(
+                f"Found multiple ComboBoxes with value '{text}'."
+            )
+
+        return matches[0]
+
+    def set_price_mode_net(self):
+        """
+        Change the Order price mode from Gross to Net
+        and verify the result.
+        """
+        self.require_connection()
+
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Cannot change price mode: "
+                "no verified Order editor is open."
+            )
+
+        # If it is already Net, do nothing.
+        try:
+            combo = self._find_combobox_with_text("Net")
+            return combo.window_text().strip()
+        except FakturamaError:
+            pass
+
+        combo = self._find_combobox_with_text("Gross")
+
+        try:
+            combo.select("Net")
+
+        except Exception:
+            try:
+                combo.set_focus()
+                combo.type_keys("{HOME}n{ENTER}")
+            except Exception as exc:
+                raise FakturamaError(
+                    "Could not change price mode to Net."
+                ) from exc
+
+        observed = combo.window_text().strip()
+
+        if observed != "Net":
+            raise FakturamaError(
+                "Price mode verification failed: "
+                f"expected 'Net', observed '{observed}'."
+            )
+
+        return observed
+
+    def verify_vat_mode(self, expected: str = "With VAT"):
+        """
+        Verify the Order VAT mode without changing it.
+        """
+        self.require_connection()
+
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Cannot verify VAT mode: "
+                "no verified Order editor is open."
+            )
+
+        combo = self._find_combobox_with_text(expected)
+
+        observed = combo.window_text().strip()
+
+        if observed != expected:
+            raise FakturamaError(
+                "VAT mode verification failed: "
+                f"expected '{expected}', observed '{observed}'."
             )
 
         return observed
