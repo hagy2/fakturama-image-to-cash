@@ -2,7 +2,7 @@
 
 This page embeds the selected Fakturama screenshots and explains what each one demonstrates. GitHub will display the PNG files directly below when they exist at the referenced paths. Regenerate and review the files from the final run before publishing the repository.
 
-> Do not submit this page with missing or outdated images. The first screenshot must show both completed item rows and the verified totals.
+
 
 ## 1. Verified Order lines and totals
 
