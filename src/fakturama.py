@@ -35,6 +35,7 @@ class FakturamaAutomation:
         return self
 
     def require_connection(self):
+        """Ensure that connect() has already succeeded."""
         if self.window is None:
             raise FakturamaError(
                 "Not connected to Fakturama. Call connect() first."
@@ -42,6 +43,7 @@ class FakturamaAutomation:
 
     @staticmethod
     def _usable_control(control) -> bool:
+     
         try:
             if not control.is_visible():
                 return False
@@ -60,6 +62,7 @@ class FakturamaAutomation:
             return False
 
     def visible_controls(self):
+        """Return currently visible and usable Fakturama controls."""
         self.require_connection()
 
         controls = []
@@ -71,6 +74,7 @@ class FakturamaAutomation:
         return controls
 
     def visible_texts(self) -> set[str]:
+        """Return non-empty text belonging to visible controls."""
         texts = set()
 
         for control in self.visible_controls():
@@ -85,6 +89,10 @@ class FakturamaAutomation:
         return texts
 
     def is_order_editor_open(self) -> bool:
+        """
+        Verify that an Order editor is open by checking
+        several independent labels.
+        """
         required = {
             "No.",
             "Date",
@@ -98,6 +106,9 @@ class FakturamaAutomation:
         return required.issubset(texts)
 
     def find_generated_order_number(self) -> Optional[str]:
+        """
+        Find a visible generated Order 
+        """
         self.require_connection()
 
         for control in self.visible_controls():
@@ -121,8 +132,9 @@ class FakturamaAutomation:
         return None
 
     def _find_toolbar_button(self, button_name: str):
-       
-        
+        """
+        Find a toolbar button dynamically by semantic text.
+        """
         self.require_connection()
 
         matches = []
@@ -132,9 +144,7 @@ class FakturamaAutomation:
                 if control.class_name() != "ToolbarWindow32":
                     continue
 
-                texts = control.texts()
-
-                if button_name in texts:
+                if button_name in control.texts():
                     matches.append(control)
 
             except Exception:
@@ -153,16 +163,19 @@ class FakturamaAutomation:
         toolbar = matches[0]
 
         try:
-            button = toolbar.button(button_name)
+            return toolbar.button(button_name)
+
         except Exception as exc:
             raise FakturamaError(
                 f"Found toolbar but could not resolve "
                 f"button '{button_name}'."
             ) from exc
 
-        return button
-
-    def _wait_for_order_editor(self, timeout: float = 5.0) -> bool:
+    def _wait_for_order_editor(
+        self,
+        timeout: float = 5.0,
+    ) -> bool:
+        """Wait until the Order editor can be verified."""
         deadline = time.monotonic() + timeout
 
         while time.monotonic() < deadline:
@@ -175,10 +188,8 @@ class FakturamaAutomation:
 
     def open_new_order(self):
         """
-        Open a New Order and verify that the Order editor actually appears.
-
+        Open a New Order and verify that the editor really appears.
         """
-
         self.require_connection()
 
         if self.is_order_editor_open():
@@ -191,7 +202,6 @@ class FakturamaAutomation:
 
         button = self._find_toolbar_button("Order")
 
-        # First attempt: normal pywinauto interaction.
         try:
             button.click_input()
         except Exception:
@@ -200,7 +210,6 @@ class FakturamaAutomation:
         if self._wait_for_order_editor():
             return self.find_generated_order_number()
 
-       
         try:
             rectangle = button.rectangle()
             point = rectangle.mid_point()
@@ -212,8 +221,7 @@ class FakturamaAutomation:
 
         except Exception as exc:
             self.capture_screenshot(
-                "artifacts/screenshots/"
-                "open_order_failure.png"
+                "artifacts/screenshots/open_order_failure.png"
             )
 
             raise FakturamaError(
@@ -222,8 +230,7 @@ class FakturamaAutomation:
 
         if not self._wait_for_order_editor():
             self.capture_screenshot(
-                "artifacts/screenshots/"
-                "open_order_failure.png"
+                "artifacts/screenshots/open_order_failure.png"
             )
 
             raise FakturamaError(
@@ -233,7 +240,149 @@ class FakturamaAutomation:
 
         return self.find_generated_order_number()
 
-    def capture_screenshot(self, path: str | Path):
+    def _visible_controls_by_class(self, class_name: str):
+        """
+        Return usable controls matching a native Windows class.
+        """
+        return [
+            control
+            for control in self.visible_controls()
+            if control.class_name() == class_name
+        ]
+
+    def _find_visible_label(self, label_text: str):
+        """
+        Find exactly one visible Static control with the requested text.
+        """
+        matches = []
+
+        for control in self._visible_controls_by_class("Static"):
+            try:
+                if control.window_text().strip() == label_text:
+                    matches.append(control)
+            except Exception:
+                continue
+
+        if len(matches) == 0:
+            raise FakturamaError(
+                f"Could not find visible label '{label_text}'."
+            )
+
+        if len(matches) > 1:
+            raise FakturamaError(
+                f"Found multiple visible labels '{label_text}'."
+            )
+
+        return matches[0]
+
+    def _find_edit_for_label(
+        self,
+        label_text: str,
+        max_vertical_distance: int = 50,
+    ):
+     
+        label = self._find_visible_label(label_text)
+        label_rect = label.rectangle()
+
+        candidates = []
+
+        label_mid_y = (
+            label_rect.top + label_rect.bottom
+        ) / 2
+
+        for edit in self._visible_controls_by_class("Edit"):
+            try:
+                rect = edit.rectangle()
+
+                edit_mid_y = (
+                    rect.top + rect.bottom
+                ) / 2
+
+                vertical_distance = abs(
+                    edit_mid_y - label_mid_y
+                )
+
+                if vertical_distance > max_vertical_distance:
+                    continue
+
+                if rect.right <= label_rect.left:
+                    continue
+
+                horizontal_distance = max(
+                    0,
+                    rect.left - label_rect.right,
+                )
+
+                score = (
+                    vertical_distance * 10
+                    + horizontal_distance
+                )
+
+                candidates.append(
+                    (score, edit)
+                )
+
+            except Exception:
+                continue
+
+        if not candidates:
+            raise FakturamaError(
+                f"Could not find an Edit control for '{label_text}'."
+            )
+
+        candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        return candidates[0][1]
+
+    def set_customer_reference(self, reference: str):
+        """
+        Set Cust.Ref. and verify the value by reading it back.
+        """
+        self.require_connection()
+
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Cannot set customer reference: "
+                "no verified Order editor is open."
+            )
+
+        field = self._find_edit_for_label(
+            "Cust.Ref."
+        )
+
+        try:
+            field.set_focus()
+            field.set_edit_text(reference)
+
+        except Exception as exc:
+            raise FakturamaError(
+                "Could not write the customer reference."
+            ) from exc
+
+        try:
+            observed = field.window_text().strip()
+
+        except Exception as exc:
+            raise FakturamaError(
+                "Could not read customer reference back."
+            ) from exc
+
+        if observed != reference:
+            raise FakturamaError(
+                "Customer reference verification failed: "
+                f"expected '{reference}', "
+                f"observed '{observed}'."
+            )
+
+        return observed
+
+    def capture_screenshot(
+        self,
+        path: str | Path,
+    ):
+        """Save a screenshot of the current Fakturama window."""
         self.require_connection()
 
         destination = Path(path)

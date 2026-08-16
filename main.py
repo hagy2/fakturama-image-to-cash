@@ -6,28 +6,34 @@ def main():
         fakturama = FakturamaAutomation().connect()
 
         print("Connected to Fakturama.")
-        print(
-            f"Window title: {fakturama.window.window_text()}"
-        )
-
-        print(
-            "Order editor before action:",
-            fakturama.is_order_editor_open(),
-        )
-
-        print("Opening New Order...")
 
         order_number = fakturama.open_new_order()
 
         print("VERIFIED: Order editor is open.")
         print(f"Generated Order No.: {order_number}")
 
-        screenshot = fakturama.capture_screenshot(
-            "artifacts/screenshots/"
-            "new_order_open.png"
+        reference = "TEST-REF-123"
+
+        print(
+            f"Setting Cust.Ref. to: {reference}"
         )
 
-        print(f"Screenshot saved to: {screenshot}")
+        observed = fakturama.set_customer_reference(
+            reference
+        )
+
+        print(
+            f"VERIFIED: Cust.Ref. = {observed}"
+        )
+
+        screenshot = fakturama.capture_screenshot(
+            "artifacts/screenshots/"
+            "customer_reference_set.png"
+        )
+
+        print(
+            f"Screenshot saved to: {screenshot}"
+        )
 
     except FakturamaError as exc:
         print(f"ERROR: {exc}")
