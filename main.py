@@ -1,3 +1,5 @@
+from datetime import date
+
 from src.fakturama import FakturamaAutomation, FakturamaError
 
 
@@ -14,21 +16,33 @@ def main():
 
         reference = "TEST-REF-123"
 
-        print(
-            f"Setting Cust.Ref. to: {reference}"
-        )
+        print(f"Setting Cust.Ref. to: {reference}")
 
-        observed = fakturama.set_customer_reference(
-            reference
+        observed_reference = (
+            fakturama.set_customer_reference(reference)
         )
 
         print(
-            f"VERIFIED: Cust.Ref. = {observed}"
+            f"VERIFIED: Cust.Ref. = "
+            f"{observed_reference}"
+        )
+
+        test_date = date(2026, 7, 14)
+
+        print(f"Setting Order Date to: {test_date}")
+
+        observed_date = fakturama.set_order_date(
+            test_date
+        )
+
+        print(
+            f"VERIFIED: Order Date = "
+            f"{observed_date}"
         )
 
         screenshot = fakturama.capture_screenshot(
             "artifacts/screenshots/"
-            "customer_reference_set.png"
+            "order_header_fields.png"
         )
 
         print(

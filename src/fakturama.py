@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional
 import time
+from datetime import date
 
 from pywinauto import Desktop, mouse
 
@@ -335,6 +336,52 @@ class FakturamaAutomation:
         )
 
         return candidates[0][1]
+    def set_order_date(self, order_date: date):
+        """
+        Set the Order Date and verify it by reading the field back.
+        """
+        self.require_connection()
+
+        if not self.is_order_editor_open():
+            raise FakturamaError(
+                "Cannot set Order Date: "
+                "no verified Order editor is open."
+            )
+
+        field = self._find_edit_for_label("Date")
+
+        
+        expected = (
+            f"{order_date.strftime('%b')} "
+            f"{order_date.day}, "
+            f"{order_date.year}"
+        )
+
+        try:
+            field.set_focus()
+            field.set_edit_text(expected)
+
+        except Exception as exc:
+            raise FakturamaError(
+                "Could not write the Order Date."
+            ) from exc
+
+        try:
+            observed = field.window_text().strip()
+
+        except Exception as exc:
+            raise FakturamaError(
+                "Could not read Order Date back."
+            ) from exc
+
+        if observed != expected:
+            raise FakturamaError(
+                "Order Date verification failed: "
+                f"expected '{expected}', "
+                f"observed '{observed}'."
+            )
+
+        return observed
 
     def set_customer_reference(self, reference: str):
         """
