@@ -42,7 +42,7 @@ The final run used existing Debtor and Product masters. The creation branches ar
 6. The UI automation requires an unlocked, visible interactive Windows desktop. It is not suitable for a disconnected or minimized non-interactive session.
 7. `debug_*.py`, `save_current_order_*.py`, and `verify_po*.py` are development/reconnaissance utilities, not production entry points.
 
-The Invoice and test-scope limitations are documented rather than hidden or replaced with unverified claims.
+
 
 ## Project structure
 
