@@ -62,7 +62,7 @@ fakturama-image-to-cash/
 │   └── logs/               Local diagnostics; excluded from submission
 ├── docs/
 │   └── EVIDENCE.md         Captions for selected screenshots
-└── SUBMISSION_CHECKLIST.md Final pre-publication checklist
+
 ```
 
 ## Requirements
